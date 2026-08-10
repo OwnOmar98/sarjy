@@ -1,0 +1,23 @@
+# env
+.env
+.env.local
+.env.*.local
+
+# node (web/)
+node_modules/
+.nuxt/
+.output/
+dist/
+
+# python (agent/)
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# build intermediates
+docs/PRD.html
+
+# editors / os
+.DS_Store
+.vscode/
