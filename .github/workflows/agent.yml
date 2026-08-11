@@ -1,0 +1,24 @@
+name: agent
+
+on:
+  push:
+    paths: ["agent/**", ".github/workflows/agent.yml"]
+  pull_request:
+    paths: ["agent/**", ".github/workflows/agent.yml"]
+
+defaults:
+  run:
+    working-directory: agent
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -e ".[dev]"
+      - run: ruff check .
+      # TODO(day 3): pytest once agent/tests/ exists, then wire eval.yml
+      # for the fixture-based scorecard (docs/PRD.md §2, §7).

@@ -1,0 +1,29 @@
+[project]
+name = "sarjy-agent"
+version = "0.1.0"
+description = "Sarjy voice agent worker — LiveKit Agents"
+requires-python = ">=3.11"
+dependencies = [
+    # Pinned <2.0: `python main.py dev` is deprecated in favor of
+    # `lk agent dev`'s AgentServer API (needs a main.py restructure we
+    # haven't done). Unpinned, a future install could drop dev mode.
+    "livekit-agents>=1.6.9,<2.0",
+    "livekit-plugins-groq",
+    "livekit-plugins-google",
+    "livekit-plugins-elevenlabs",
+    "livekit-plugins-silero",
+    "livekit-plugins-noise-cancellation",
+    "asyncpg",
+    "redis",
+    "pydantic>=2",
+    "python-dotenv",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-asyncio", "ruff"]
+
+[tool.setuptools]
+py-modules = ["main", "tools", "memory", "latency", "tts_adapter"]
+
+[tool.ruff]
+line-length = 100
