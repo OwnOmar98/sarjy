@@ -1,0 +1,14 @@
+{
+  "name": "sarjy",
+  "private": true,
+  "description": "Root script runner only — web/ and agent/ are separate projects (npm + a Python venv), not an npm workspace.",
+  "scripts": {
+    "dev:web": "cd web && npm run dev",
+    "dev:agent": "cd agent && .venv/bin/python main.py dev",
+    "build:web": "cd web && npm run build",
+    "typecheck:web": "cd web && npm run typecheck",
+    "lint:agent": "cd agent && .venv/bin/ruff check .",
+    "docker:up": "cd db && docker compose up -d",
+    "docker:down": "cd db && docker compose down"
+  }
+}

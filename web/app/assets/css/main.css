@@ -1,0 +1,56 @@
+/*
+  Mashrabiya Lattice direction — typography + the lattice motif.
+  Full brief: app.vue's direction-contract comment.
+*/
+
+/*
+  Secondary-text and error tokens — solid colors, not opacity. Fading
+  meta text (speaker labels, timestamps, empty states) via opacity on
+  the ink color measures well under WCAG's 4.5:1 body-text minimum on
+  this palette (walnut ink #2B241C on warm sand #F2EDE3) — 0.4 opacity
+  is ~2.3:1, 0.55 is ~3.4:1, even Vuetify's own text-medium-emphasis
+  default (0.6) is ~3.9:1. Opacity also blends unpredictably with
+  whatever sits underneath; these are solid colors instead, ≥5.6:1 in
+  both themes.
+*/
+.v-theme--light {
+  --ink-muted: rgb(99, 92, 84);
+  --state-error: rgb(162, 59, 46);
+}
+
+.v-theme--dark {
+  --ink-muted: rgb(167, 162, 153);
+  --state-error: rgb(224, 122, 95);
+}
+
+.v-application,
+body {
+  font-family: "IBM Plex Sans", "IBM Plex Sans Arabic", sans-serif !important;
+}
+
+/* Arabic-first for pure-Arabic runs — mixed-script fallback above
+   already covers per-glyph rendering; this just fixes line-height. */
+:lang(ar) {
+  font-family: "IBM Plex Sans Arabic", "IBM Plex Sans", sans-serif !important;
+}
+
+/* mask-image, not background-image — one SVG recolors correctly in
+   both themes via background-color, at the call site's chosen opacity. */
+.lattice-surface {
+  position: relative;
+}
+
+.lattice-surface::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  /* --lattice-color (with alpha), set per call site, controls tint. */
+  background-color: var(--lattice-color, rgba(43, 36, 28, 0.06));
+  -webkit-mask-image: url("/patterns/lattice.svg");
+  mask-image: url("/patterns/lattice.svg");
+  -webkit-mask-repeat: repeat;
+  mask-repeat: repeat;
+  -webkit-mask-size: 48px 48px;
+  mask-size: 48px 48px;
+}

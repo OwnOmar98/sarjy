@@ -14,6 +14,8 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+.ruff_cache/
+*.egg-info/
 
 # build intermediates
 docs/PRD.html
@@ -21,3 +23,10 @@ docs/PRD.html
 # editors / os
 .DS_Store
 .vscode/
+
+# Impeccable design skill — local session/tooling state (decision-page
+# daemon logs, live-mode journals, generated review screenshots/comps).
+# Ignoring the whole directory since there's no shared .impeccable/config.json
+# to check in yet; if one gets added later to share hook/detector settings
+# with teammates, carve out an exception for that one file specifically.
+.impeccable/

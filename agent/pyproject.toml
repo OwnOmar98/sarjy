@@ -1,0 +1,51 @@
+[project]
+name = "sarjy-agent"
+version = "0.1.0"
+description = "Sarjy voice agent worker — LiveKit Agents"
+requires-python = ">=3.11"
+dependencies = [
+    # Pinned <2.0: `python main.py dev` is deprecated in favor of
+    # `lk agent dev`'s AgentServer API (needs a main.py restructure we
+    # haven't done). Unpinned, a future install could drop dev mode.
+    "livekit-agents>=1.6.9,<2.0",
+    "livekit-plugins-groq",
+    "livekit-plugins-google",
+    "livekit-plugins-elevenlabs",
+    "livekit-plugins-silero",
+    "livekit-plugins-noise-cancellation",
+    # Used directly, not just as a transitive dep of livekit-plugins-groq
+    # (which subclasses it): stt_adapter.py/llm_adapter.py's OpenAI
+    # fallback providers.
+    "livekit-plugins-openai",
+    "asyncpg",
+    "redis",
+    "pydantic>=2",
+    "python-dotenv",
+    # Used directly (not just via a livekit plugin): memory.py's fact
+    # extraction (Groq, OpenAI-compatible), embedding_adapter.py (Gemini
+    # embeddings), and tools.py's Aladhan prayer-time call. Pinned
+    # explicitly rather than riding along as transitive deps of
+    # livekit-plugins-groq/google.
+    "openai",
+    "google-genai",
+    "httpx",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-asyncio", "ruff"]
+
+[tool.setuptools]
+py-modules = [
+    "main",
+    "tools",
+    "db",
+    "memory",
+    "embedding_adapter",
+    "latency",
+    "tts_adapter",
+    "stt_adapter",
+    "llm_adapter",
+]
+
+[tool.ruff]
+line-length = 100

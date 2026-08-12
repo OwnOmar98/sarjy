@@ -1,0 +1,30 @@
+services:
+  sarjy-postgres:
+    container_name: sarjy-postgres
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    ports:
+      # 5533/6380 — chosen to avoid himam-nest (55432, 33306, 6381, 8082)
+      # and Dallali's local Supabase stack (54391, 54393, 54394, 54399),
+      # plus the currently-occupied system defaults (3306, 6379).
+      - "5533:5432"
+    environment:
+      POSTGRES_DB: sarjy
+      POSTGRES_USER: sarjy
+      POSTGRES_PASSWORD: sarjy
+    volumes:
+      - sarjy-pgdata:/var/lib/postgresql/data
+      - ./schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+
+  sarjy-redis:
+    container_name: sarjy-redis
+    image: redis:alpine
+    restart: unless-stopped
+    ports:
+      - "6380:6379"
+    volumes:
+      - sarjy-redis-data:/data
+
+volumes:
+  sarjy-pgdata:
+  sarjy-redis-data:
