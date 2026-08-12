@@ -72,7 +72,7 @@ The brief offers ~10 issues to explore and says to pick a couple. I picked three
 └───────────┬─────────────┘
             │
 ┌───────────▼─────────────────────────────────────────┐
-│  Agent worker — Python, LiveKit Agents  (Fly.io)    │
+│  Agent worker — Python, LiveKit Agents (LiveKit Cloud)│
 │                                                     │
 │   VAD ──► turn detector ──► STT ──► LLM ──► TTS     │
 │                              │       │       │      │
@@ -85,6 +85,7 @@ The brief offers ~10 issues to explore and says to pick a couple. I picked three
             │
 ┌───────────▼─────────────┐   ┌──────────────────────┐
 │ Postgres + pgvector     │   │ Redis                │
+│ (Neon)                  │   │ (Upstash)             │
 │ facts · transcripts     │   │ TTS cache · sessions │
 │ turn traces             │   │ memory cache         │
 └─────────────────────────┘   └──────────────────────┘
