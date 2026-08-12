@@ -21,15 +21,13 @@ export default defineNuxtConfig({
       // (named layouts, unused here) — rename Vuetify's so neither
       // auto-import gets silently dropped.
       prefixComposables: ["useLayout"],
-      // Without this, SSR always renders light while the client may
-      // pick dark via prefers-color-scheme — hydration mismatch on every
-      // Vuetify component. Reads the real preference via Client
-      // Hints/cookie before rendering.
+      // Dark theme exists (vuetifyOptions.theme.themes.dark below) but
+      // isn't reviewed/finished yet — auto-switching to it via OS
+      // preference (prefersColorScheme) meant a cleared cookie silently
+      // dropped users into an unfinished dark UI. Forced light for now;
+      // re-enable prefersColorScheme once dark is actually reviewed.
       ssrClientHints: {
-        prefersColorScheme: true,
-        prefersColorSchemeOptions: {
-          useBrowserThemeOnly: false,
-        },
+        prefersColorScheme: false,
       },
     },
     vuetifyOptions: {

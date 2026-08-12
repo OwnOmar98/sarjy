@@ -4,8 +4,20 @@ export default {
   title: "Sarjy",
   language: "Language",
   start: "Start talking",
-  connected: "Connected — say something.",
+  connecting: "Connecting…",
+  micDenied:
+    "Microphone access was blocked. Allow it in your browser and try again.",
+  connectFailed: "Couldn't connect. Check your connection and try again.",
+  audioBlocked:
+    "Your browser is blocking audio playback — tap here to hear Sarjy.",
   stop: "Stop",
-  waitingForTurn: "Waiting for first turn…",
+  micLevel: "Microphone level",
+  you: "You",
+  listening: "Listening…",
+  thinking: "Thinking…",
+  agentSpeaking: "Sarjy is speaking…",
+  transcriptEmpty: "Say something — it'll show up here.",
+  latencyHeading: "Latency",
+  latencyEmpty: "No timing data yet.",
   $vuetify,
 };

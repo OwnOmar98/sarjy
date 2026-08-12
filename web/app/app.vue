@@ -1,5 +1,17 @@
 <script setup lang="ts">
-const { connected, connect, disconnect } = useSarjyRoom();
+const {
+  connected,
+  connecting,
+  connectError,
+  connect,
+  disconnect,
+  micLevel,
+  transcript,
+  awaitingReply,
+  conversationState,
+  audioBlocked,
+  resumeAudio,
+} = useSarjyRoom();
 const stages: { stage: string; ms: number }[] = [];
 
 const { locale, locales, t, setLocale } = useI18n();
@@ -88,15 +100,44 @@ useHead({
           v-if="!connected"
           class="aperture-button"
           type="button"
+          :disabled="connecting"
           @click="connect"
         >
-          {{ t("start") }}
+          {{ connecting ? t("connecting") : t("start") }}
         </button>
-        <div v-else class="mb-6">
-          <p class="text-body-1 mb-3">{{ t("connected") }}</p>
-          <v-btn variant="outlined" size="small" @click="disconnect">
-            {{ t("stop") }}
-          </v-btn>
+        <p v-if="connectError" class="connect-error" role="alert">
+          {{
+            connectError === "mic-denied" ? t("micDenied") : t("connectFailed")
+          }}
+        </p>
+        <div v-if="connected" class="mb-6">
+          <!-- Browsers can silently block audio autoplay even after the
+            Start-talking click (useSarjyRoom.ts audioBlocked) — without
+            this, Sarjy would be speaking with no indication anything's
+            wrong: the transcript updates live, nothing is heard. -->
+          <button
+            v-if="audioBlocked"
+            class="audio-blocked-banner"
+            type="button"
+            @click="resumeAudio"
+          >
+            {{ t("audioBlocked") }}
+          </button>
+          <VoiceLevelMeter
+            :level="micLevel"
+            :state="conversationState"
+            class="mb-4"
+          />
+          <div>
+            <v-btn variant="outlined" size="small" @click="disconnect">
+              {{ t("stop") }}
+            </v-btn>
+          </div>
+          <TranscriptPanel
+            :entries="transcript"
+            :awaiting-reply="awaitingReply"
+            class="mt-6"
+          />
         </div>
 
         <LatencyHud :stages="stages" class="mt-8" />
@@ -145,5 +186,43 @@ useHead({
 
 .aperture-button:active {
   transform: scale(0.98);
+}
+
+.aperture-button:disabled {
+  cursor: default;
+  opacity: 0.6;
+  transform: none;
+}
+
+.connect-error {
+  margin-block-start: 1rem;
+  padding: 0.5rem 1rem;
+  border: 1px solid var(--state-error);
+  color: var(--state-error);
+  font-size: 0.85rem;
+}
+
+.audio-blocked-banner {
+  display: block;
+  width: 100%;
+  margin-block-end: 1rem;
+  padding: 0.75rem 1rem;
+  border: 1px solid var(--state-error);
+  background-color: transparent;
+  color: var(--state-error);
+  font-family: "IBM Plex Sans", "IBM Plex Sans Arabic", sans-serif;
+  font-size: 0.85rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.audio-blocked-banner:hover {
+  background-color: rgba(162, 59, 46, 0.08);
+}
+
+.audio-blocked-banner:focus-visible {
+  outline: 2px solid var(--state-error);
+  outline-offset: 2px;
 }
 </style>
