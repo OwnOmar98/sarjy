@@ -49,7 +49,11 @@ function percentile(sorted: number[], p: number): number {
   return sorted[idx]!;
 }
 
-export type ConversationState = "listening" | "thinking" | "speaking";
+export type ConversationState =
+  | "preparing"
+  | "listening"
+  | "thinking"
+  | "speaking";
 export type ConnectError = "mic-denied" | "connect-failed";
 
 export function useSarjyRoom() {
@@ -79,6 +83,13 @@ export function useSarjyRoom() {
   );
   const awaitingReply = ref(false);
   const agentSpeaking = ref(false);
+  // The mic goes live the instant the room connects, well before the
+  // agent has joined or spoken — showing "Listening…" from that moment
+  // reads as "talk now" even though nothing has been said yet. Set once,
+  // the first time the agent is heard speaking (its greeting), and never
+  // reset except by a fresh connect() — later turns rely on
+  // awaitingReply/agentSpeaking instead, same as before.
+  const agentGreeted = ref(false);
   // Browsers can silently block audio autoplay even after a user gesture
   // (the "Start talking" click) if the agent's track subscribes slightly
   // later, asynchronously, outside that click's immediate scope — LiveKit
@@ -98,6 +109,7 @@ export function useSarjyRoom() {
   const conversationState = computed<ConversationState>(() => {
     if (agentSpeaking.value) return "speaking";
     if (awaitingReply.value) return "thinking";
+    if (!agentGreeted.value) return "preparing";
     return "listening";
   });
 
@@ -162,6 +174,7 @@ export function useSarjyRoom() {
     latencyHistory.value = {};
     awaitingReply.value = false;
     agentSpeaking.value = false;
+    agentGreeted.value = false;
     connectedAt = Date.now();
 
     try {
@@ -203,6 +216,7 @@ export function useSarjyRoom() {
     connected.value = false;
     awaitingReply.value = false;
     agentSpeaking.value = false;
+    agentGreeted.value = false;
     audioBlocked.value = false;
     stopLevelMeter();
   });
@@ -254,9 +268,11 @@ export function useSarjyRoom() {
   // "is the agent's voice active right now" — used for the thinking/
   // speaking state label only, never for a fabricated amplitude meter.
   room.on(RoomEvent.ActiveSpeakersChanged, (speakers) => {
-    agentSpeaking.value = speakers.some(
+    const speaking = speakers.some(
       (p) => p.identity !== room.localParticipant.identity,
     );
+    agentSpeaking.value = speaking;
+    if (speaking) agentGreeted.value = true;
   });
 
   // Fires for both the user's own STT transcript and the agent's

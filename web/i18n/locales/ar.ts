@@ -12,6 +12,7 @@ export default {
   stop: "إيقاف",
   micLevel: "مستوى الميكروفون",
   you: "أنت",
+  preparing: "سارجي يستعد…",
   listening: "يستمع…",
   thinking: "يفكّر…",
   agentSpeaking: "سرجي يتحدث…",

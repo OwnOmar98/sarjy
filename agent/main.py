@@ -64,12 +64,26 @@ _FALLBACK_MESSAGE = (
     "عذرًا، واجهت مشكلة، ممكن تجرب مرة ثانية؟"
 )
 
+# docs/HANDOFF.md's diagnosed "early speech can be silently dropped" gap
+# (task #16): livekit-agents replaces user audio with silence before STT
+# for aec_warmup_duration seconds (default 3s, see AgentSession below)
+# after the agent starts speaking, to stop it hearing its own echo — real
+# protection, not a bug, but it means genuine speech that overlaps the
+# greeting's first few seconds never reaches STT at all. transcription_timeout
+# (below) is the SDK's own answer: it fires when VAD saw speech but no
+# transcript showed up in time, covering this case and any other STT gap
+# (a slow/failed provider) the same way — this message plays instead of
+# leaving the user talking into silence.
+_MISSED_SPEECH_MESSAGE = (
+    "Sorry, I didn't catch that — could you say it again? عذرًا، لم ألتقط كلامك، ممكن تعيد؟"
+)
+
 # TTS phrase cache candidates (docs/PRD.md §4) — the only text in this
 # codebase that's genuinely fixed turn to turn. Everything else the
 # agent says is LLM-generated and varies per turn, so it was never a
 # cache candidate; caching it would mean matching on content that's
 # different every time, which is a cache that never hits.
-_CACHEABLE_PHRASES = {_FALLBACK_MESSAGE}
+_CACHEABLE_PHRASES = {_FALLBACK_MESSAGE, _MISSED_SPEECH_MESSAGE}
 
 
 async def _strip_leaked_tool_syntax(
@@ -318,7 +332,22 @@ async def entrypoint(ctx: JobContext) -> None:
             "preemptive_generation": {"enabled": False},
             "turn_detection": inference.TurnDetector(),
         },
+        # Fires when VAD saw the user speak but no transcript showed up in
+        # time — covers both a slow/failed STT call and audio that was
+        # deliberately withheld from STT during aec_warmup_duration's
+        # silence-substitution window (task #16: "early speech can be
+        # silently dropped"). Timed from end-of-speech, not speech start
+        # (confirmed in livekit-agents' audio_recognition.py) — eval/run.py's
+        # own p50/p95 numbers put real stt latency at 1113/1396ms, so 2.5s
+        # is comfortably above worst-case-but-still-arriving before firing
+        # on a genuine drop.
+        transcription_timeout=2.5,
     )
+
+    @session.on("user_transcription_timeout")
+    def _on_user_transcription_timeout(ev) -> None:
+        logger.warning("user spoke (%.2fs) but no transcript arrived in time", ev.speech_duration)
+        session.say(_MISSED_SPEECH_MESSAGE)
 
     @session.on("user_input_transcribed")
     def _on_user_input_transcribed(ev) -> None:
