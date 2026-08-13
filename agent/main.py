@@ -208,12 +208,21 @@ class SarjyAgent(Agent):
                 "For get_prayer_time and check_calendar_availability, "
                 "call immediately without narrating first — explain only "
                 "after they return. Booking is different: check "
-                "availability first; if the user hasn't said how long "
-                "the meeting should be, ask, don't assume a duration; "
-                "once you know the time and duration, state them back in "
-                "one short sentence and wait for the user to actually "
-                "confirm before calling book_calendar_event — never book "
-                "in the same turn you first mention a resolved time."
+                "availability first. The tools only take a duration in "
+                "minutes, not an end time — if the user gave both a start "
+                'and an end ("between 1 and 2", "from 3 to 4:30"), '
+                "compute the duration yourself, don't ask for it again; "
+                "only ask if a duration truly can't be worked out from "
+                "what they said. Once you know the time and duration, "
+                "state them back in one short sentence and wait for the "
+                "user to confirm before calling book_calendar_event — "
+                "never book in the same turn you first mention a resolved "
+                "time. This is a voice conversation with no keyboard: "
+                "never ask the user to type anything, and never require "
+                'one exact word — any clear spoken yes ("confirm", '
+                '"yes", "go ahead", "book it", "نعم", "احجزها") '
+                "counts; a clear no or a change of details means don't "
+                "book yet."
             ),
             tools=[
                 get_prayer_time,
