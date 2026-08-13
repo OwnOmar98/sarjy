@@ -8,26 +8,35 @@
 <script setup lang="ts">
 import type { ConversationState } from "~/composables/useSarjyRoom";
 
-const props = defineProps<{ level: number; state: ConversationState }>();
+const props = defineProps<{
+  level: number;
+  state: ConversationState;
+  muted?: boolean;
+}>();
 const { t } = useI18n();
 
 const SEGMENTS = 10;
 const active = computed(() => Math.round(props.level * SEGMENTS));
 
-// Real amplitude drives the bars only while it's actually your turn —
-// during thinking/speaking your mic level is near-silent anyway (true
-// signal), so cells rest at a fixed low mark instead of guttering at
-// whatever noise-floor number the analyser happens to report. No
-// fabricated activity for the agent's voice; the label carries that.
+// Real amplitude drives the bars only while it's actually your turn and
+// you're not muted — during thinking/speaking your mic level is
+// near-silent anyway (true signal), so cells rest at a fixed low mark
+// instead of guttering at whatever noise-floor number the analyser
+// happens to report. Forced to rest while muted too, regardless of what
+// the underlying track reports — the meter must never look "live" when
+// nothing is actually being sent, or muting stops feeling trustworthy.
 const restingCells = 2;
 const displayActive = computed(() =>
-  props.state === "listening" ? active.value : restingCells,
+  props.state === "listening" && !props.muted ? active.value : restingCells,
 );
 
 const statusLabel = computed(() => {
   if (props.state === "speaking") return t("agentSpeaking");
   if (props.state === "thinking") return t("thinking");
   if (props.state === "preparing") return t("preparing");
+  // Only overrides "listening" — mid-turn, what Sarjy is doing is more
+  // useful than a mute reminder you're already seeing on the button.
+  if (props.muted) return t("muted");
   return t("listening");
 });
 </script>

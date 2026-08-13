@@ -11,10 +11,13 @@ export default {
   audioBlocked:
     "Your browser is blocking audio playback — tap here to hear Sarjy.",
   stop: "Stop",
+  mute: "Mute",
+  unmute: "Unmute",
   micLevel: "Microphone level",
   you: "You",
   preparing: "Sarjy is getting ready…",
   listening: "Listening…",
+  muted: "Muted",
   thinking: "Thinking…",
   agentSpeaking: "Sarjy is speaking…",
   transcriptEmpty: "Say something — it'll show up here.",

@@ -5,6 +5,8 @@ const {
   connectError,
   connect,
   disconnect,
+  muted,
+  toggleMute,
   micLevel,
   transcript,
   latencyStages,
@@ -127,12 +129,48 @@ useHead({
           <VoiceLevelMeter
             :level="micLevel"
             :state="conversationState"
+            :muted="muted"
             class="mb-4"
           />
-          <div>
-            <v-btn variant="outlined" size="small" @click="disconnect">
+          <div class="d-flex justify-center ga-3">
+            <button
+              class="control-button"
+              type="button"
+              :aria-pressed="muted"
+              @click="toggleMute"
+            >
+              <!-- Authored line icon, not a system icon font — none is
+                wired into this project, and the app's whole language is
+                hand-drawn geometry (the octagon cuts), not Material
+                defaults. Mic body + stand, one consistent stroke; the
+                slash is the actual state signal, always solid red
+                regardless of hover/focus so it reads at a glance. -->
+              <svg
+                class="mute-icon"
+                width="18"
+                height="18"
+                viewBox="0 0 20 20"
+                fill="none"
+                aria-hidden="true"
+              >
+                <rect x="7.5" y="2.5" width="5" height="9" rx="2.5" />
+                <path d="M4.5 9.5a5.5 5.5 0 0 0 11 0" />
+                <line x1="10" y1="15" x2="10" y2="17.5" />
+                <line x1="6.5" y1="17.5" x2="13.5" y2="17.5" />
+                <line
+                  v-if="muted"
+                  class="mute-icon__slash"
+                  x1="3"
+                  y1="3"
+                  x2="17"
+                  y2="17"
+                />
+              </svg>
+              {{ muted ? t("unmute") : t("mute") }}
+            </button>
+            <button class="control-button" type="button" @click="disconnect">
               {{ t("stop") }}
-            </v-btn>
+            </button>
           </div>
           <TranscriptPanel
             :entries="transcript"
@@ -197,6 +235,76 @@ useHead({
   cursor: default;
   opacity: 0.6;
   transform: none;
+}
+
+/* Secondary controls, same octagon-cut family as .aperture-button
+   (and VoiceLevelMeter's cells) at a smaller scale — outlined/ghost
+   here since these are secondary actions, not the primary CTA. */
+.control-button {
+  clip-path: polygon(
+    16% 0%,
+    84% 0%,
+    100% 16%,
+    100% 84%,
+    84% 100%,
+    16% 100%,
+    0% 84%,
+    0% 16%
+  );
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.5rem 1.25rem;
+  min-width: 6rem;
+  font-family: "IBM Plex Sans", "IBM Plex Sans Arabic", sans-serif;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--ink-muted);
+  background-color: transparent;
+  border: 1.5px solid var(--ink-muted);
+  cursor: pointer;
+  transition:
+    color 0.15s ease,
+    border-color 0.15s ease,
+    transform 0.15s ease;
+}
+
+.control-button:hover {
+  color: rgb(var(--v-theme-primary));
+  border-color: rgb(var(--v-theme-primary));
+}
+
+.control-button:focus-visible {
+  outline: none;
+  filter: drop-shadow(1.5px 0 0 rgb(var(--v-theme-on-surface)))
+    drop-shadow(-1.5px 0 0 rgb(var(--v-theme-on-surface)))
+    drop-shadow(0 1.5px 0 rgb(var(--v-theme-on-surface)))
+    drop-shadow(0 -1.5px 0 rgb(var(--v-theme-on-surface)));
+}
+
+.control-button:active {
+  transform: scale(0.96);
+}
+
+.mute-icon {
+  flex-shrink: 0;
+}
+
+.mute-icon rect,
+.mute-icon path,
+.mute-icon line {
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+}
+
+/* The state signal, not decoration — stays solid error-red regardless
+   of the button's own hover/focus color, so "muted" reads the same
+   whether or not you're pointing at it. */
+.mute-icon__slash {
+  stroke: var(--state-error) !important;
 }
 
 .connect-error {
