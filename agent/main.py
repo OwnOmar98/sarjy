@@ -9,6 +9,7 @@ loop, deployed. Stubbed pieces are TODO-tagged per docs/PRD.md.
 import asyncio
 import logging
 import time
+import uuid
 from collections.abc import AsyncIterable, AsyncIterator
 
 from dotenv import load_dotenv
@@ -257,27 +258,21 @@ def prewarm(proc: JobProcess) -> None:
     # Load VAD once per worker process, not per session.
     proc.userdata["vad"] = silero.VAD.load()
 
-    # TEMPORARY — one-time region probe (docs/PRD.md's open question: is
-    # Groq/Gemini actually routing to a KSA-region facility, or all the
-    # way to the US?). TTFB against a known-us-east-1-only reference for
-    # comparison. Read via `lk agent logs`, then revert this block — not
-    # meant to stay in prewarm() permanently.
-    import time
 
-    import httpx
-
-    for name, url in {
-        "groq": "https://api.groq.com/openai/v1/models",
-        "gemini": "https://generativelanguage.googleapis.com/",
-        "us_reference_dynamodb_useast1": "https://dynamodb.us-east-1.amazonaws.com/",
-    }.items():
-        try:
-            start = time.monotonic()
-            httpx.get(url, timeout=5)
-            elapsed_ms = (time.monotonic() - start) * 1000
-            logger.info("region_probe: %s -> %.0fms", name, elapsed_ms)
-        except Exception:
-            logger.warning("region_probe: %s failed", name, exc_info=True)
+def _normalize_user_id(identity: str) -> str:
+    # facts.user_id and calendar_events.user_id are both uuid columns
+    # (db/schema.sql) — the real frontend always sends a real UUID
+    # (useSarjyRoom.ts's crypto.randomUUID()), but nothing stops some
+    # other client from joining with an arbitrary identity string, and
+    # that would otherwise crash the *entire* session the moment
+    # memory.py/tools.py first hit Postgres with it — the exact kind of
+    # silent-failure this codebase guards against everywhere else.
+    # Deterministic, so the same non-UUID identity still maps to the
+    # same row every session rather than a fresh one each time.
+    try:
+        return str(uuid.UUID(identity))
+    except ValueError:
+        return str(uuid.uuid5(uuid.NAMESPACE_URL, identity))
 
 
 async def entrypoint(ctx: JobContext) -> None:
@@ -287,7 +282,7 @@ async def entrypoint(ctx: JobContext) -> None:
     # it as the LiveKit identity — that's what memory keys facts on across
     # sessions (web/app/composables/useSarjyRoom.ts, web/server/api/token.get.ts).
     participant = await ctx.wait_for_participant()
-    user_id = participant.identity
+    user_id = _normalize_user_id(participant.identity)
 
     latency = LatencyTracker(room=ctx.room, session_id=ctx.room.name)
 
