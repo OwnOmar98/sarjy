@@ -11,6 +11,7 @@ agent/memory.py keys facts on.
 """
 
 from datetime import datetime, timedelta
+from typing import Literal
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -22,7 +23,7 @@ _ALADHAN_BASE = "https://api.aladhan.com/v1/timingsByCity"
 _ALADHAN_METHOD = (
     4  # Umm al-Qura University, Makkah — standard for KSA (docs/PRD.md: users are in KSA)
 )
-_VALID_PRAYERS = {"Fajr", "Dhuhr", "Asr", "Maghrib", "Isha"}
+_Prayer = Literal["Fajr", "Dhuhr", "Asr", "Maghrib", "Isha"]
 _DEFAULT_TZ = ZoneInfo("Asia/Riyadh")
 
 
@@ -82,18 +83,22 @@ def _to_local(dt: datetime) -> datetime:
 
 @function_tool
 async def get_prayer_time(
-    city: str, prayer: str, date: str = "today", country: str = "Saudi Arabia"
+    city: str, prayer: _Prayer, date: str = "today", country: str = "Saudi Arabia"
 ) -> str:
     """Look up a prayer time for a given city via the Aladhan API.
 
     Args:
         city: City name, e.g. "Riyadh".
-        prayer: One of Fajr, Dhuhr, Asr, Maghrib, Isha.
         date: "today", "tomorrow", or an ISO date (YYYY-MM-DD).
         country: Defaults to Saudi Arabia.
     """
-    if prayer not in _VALID_PRAYERS:
-        return f"Unknown prayer '{prayer}'. Valid: {', '.join(sorted(_VALID_PRAYERS))}."
+    # The Literal type already constrains this at the schema level for a
+    # well-behaved provider (strict function-calling) — kept as a cheap
+    # defensive fallback, not the primary guard, since this codebase has
+    # documented real instances of Groq/Llama not perfectly honoring a
+    # tool schema.
+    if prayer not in _Prayer.__args__:
+        return f"Unknown prayer '{prayer}'. Valid: {', '.join(_Prayer.__args__)}."
 
     try:
         target = _resolve_date(date)
@@ -120,10 +125,12 @@ async def get_prayer_time(
     hour, minute = (int(p) for p in time_str.split(":"))
     when = target.astimezone(tz).replace(hour=hour, minute=minute, second=0, microsecond=0)
 
-    return (
-        f"{prayer} in {city} on {when.date().isoformat()} is at {time_str} ({tz.key}). "
-        f"ISO: {when.isoformat()}"
-    )
+    # Just the ISO timestamp, not also a separately-spelled-out date/time
+    # — main.py's instructions already forbid speaking either verbatim,
+    # so the human-formatted duplicate never earned its tokens; the ISO
+    # value alone still has everything needed to chain into the next
+    # tool call (date, time, and offset in one parseable string).
+    return f"{prayer} in {city}: {when.isoformat()}"
 
 
 @function_tool
