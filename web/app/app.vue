@@ -12,6 +12,8 @@ const {
   latencyStages,
   latencyPercentiles,
   awaitingReply,
+  ready,
+  slowToStart,
   conversationState,
   audioBlocked,
   resumeAudio,
@@ -98,22 +100,47 @@ useHead({
         style="max-width: 32rem"
       >
         <!-- Signature interaction: octagonal "aperture" (the lattice's
-          8-point construction), not a rounded pill — direction as form. -->
+          8-point construction), not a rounded pill — direction as form.
+          Stays the visible state through BOTH network-connecting and
+          waiting-for-the-agent-to-actually-greet — the room being
+          technically connected doesn't mean anything's ready yet, and
+          revealing the real controls (Stop especially) that early is
+          what let a real early "hello" reach the room before the agent
+          had ever spoken (see useSarjyRoom.ts connect()). -->
         <button
-          v-if="!connected"
+          v-if="!ready"
           class="aperture-button"
           type="button"
-          :disabled="connecting"
+          :disabled="connecting || connected"
           @click="connect"
         >
-          {{ connecting ? t("connecting") : t("start") }}
+          {{
+            connecting
+              ? t("connecting")
+              : connected
+                ? t("preparing")
+                : t("start")
+          }}
+        </button>
+        <!-- Escape hatch, not the default path: "preparing" hanging is
+          real, not hypothetical (today's TTS-provider outage left the
+          greeting never playing at all) — past READY_TIMEOUT_MS with no
+          greeting, this surfaces instead of leaving a silent, stuck
+          spinner with no way out except closing the tab. -->
+        <button
+          v-if="slowToStart"
+          class="audio-blocked-banner mt-4"
+          type="button"
+          @click="disconnect"
+        >
+          {{ t("slowToStart") }}
         </button>
         <p v-if="connectError" class="connect-error" role="alert">
           {{
             connectError === "mic-denied" ? t("micDenied") : t("connectFailed")
           }}
         </p>
-        <div v-if="connected" class="mb-6">
+        <div v-if="ready" class="mb-6">
           <!-- Browsers can silently block audio autoplay even after the
             Start-talking click (useSarjyRoom.ts audioBlocked) — without
             this, Sarjy would be speaking with no indication anything's
@@ -133,6 +160,10 @@ useHead({
             class="mb-4"
           />
           <div class="d-flex justify-center ga-3">
+            <!-- No separate guard needed on Mute anymore — this whole
+              block only renders once `ready` is true, which already
+              implies the agent has greeted, so the entire loading phase
+              (not just this one button) stays hidden until then. -->
             <button
               class="control-button"
               type="button"

@@ -22,8 +22,15 @@ from livekit.plugins import openai as openai_plugin
 # utterances toward an English detection. Also carries the "Sarjy"
 # vocabulary hint (misheard as "Sergey" otherwise) and a few short words
 # that fixed real word-level transcription errors ("نعم" heard as "نام").
+#
+# No "مرحباً" ("hello") here deliberately — confirmed live, it isn't
+# hypothetical: a real "hello," said early (before the agent had even
+# spoken), came back mis-transcribed as exactly this word, sitting right
+# next to "Sarjy" in the old prompt. It's a near-perfect collision —
+# biasing toward the single Arabic word semantically closest to the most
+# likely thing anyone says first is asking for exactly this failure.
 _STT_PROMPT = (
-    "Hi, I'm Sarjy, your voice assistant. مرحباً، أنا سرجي، مساعدك الصوتي. "
+    "Hi, I'm Sarjy, your voice assistant. أنا سرجي، مساعدك الصوتي. "
     "نعم، لا، بكرا، اليوم، المغرب، الظهر، العصر، الفجر، العشاء، اجتماع."
 )
 
