@@ -90,6 +90,35 @@ export function useSarjyRoom() {
   // reset except by a fresh connect() — later turns rely on
   // awaitingReply/agentSpeaking instead, same as before.
   const agentGreeted = ref(false);
+  // "Connected but not yet greeted" is still a loading state, not the
+  // real interactive UI — the room technically connecting doesn't mean
+  // the agent has joined or is ready, so the whole meter/buttons/
+  // transcript block stays hidden behind this instead of `connected`
+  // alone. A hang here is real, not hypothetical — today's TTS-provider
+  // outage left the greeting never playing at all — so this isn't a
+  // permanent hidden state: past READY_TIMEOUT_MS with no greeting,
+  // slowToStart surfaces a way out instead of a silent, stuck spinner.
+  const ready = computed(() => connected.value && agentGreeted.value);
+  const slowToStart = ref(false);
+  const READY_TIMEOUT_MS = 8000;
+  let readyTimeoutId: ReturnType<typeof setTimeout> | null = null;
+
+  function clearReadyTimeout() {
+    if (readyTimeoutId !== null) {
+      clearTimeout(readyTimeoutId);
+      readyTimeoutId = null;
+    }
+    slowToStart.value = false;
+  }
+
+  function startReadyTimeout() {
+    clearReadyTimeout();
+    readyTimeoutId = setTimeout(() => {
+      slowToStart.value = true;
+      readyTimeoutId = null;
+    }, READY_TIMEOUT_MS);
+  }
+
   // Browsers can silently block audio autoplay even after a user gesture
   // (the "Start talking" click) if the agent's track subscribes slightly
   // later, asynchronously, outside that click's immediate scope — LiveKit
@@ -188,6 +217,7 @@ export function useSarjyRoom() {
     agentSpeaking.value = false;
     agentGreeted.value = false;
     muted.value = false;
+    clearReadyTimeout();
     connectedAt = Date.now();
 
     try {
@@ -202,7 +232,19 @@ export function useSarjyRoom() {
       if (publication?.track) {
         startLevelMeter(publication.track.mediaStreamTrack);
       }
+      // Confirmed live: a real early "hello" landed in the STT bias
+      // prompt's own Arabic sample ("مرحباً", the literal Arabic word
+      // for "hello") and came back mis-transcribed — said before the
+      // agent had ever spoken, well before the "preparing" label alone
+      // stopped anyone. That label discourages; muting here actually
+      // prevents it — real audio never reaches the room during the
+      // vulnerable window at all. Auto-unmutes the instant the agent is
+      // first heard speaking (ActiveSpeakersChanged below), same
+      // primitive the manual Mute button already uses.
+      await room.localParticipant.setMicrophoneEnabled(false);
+      muted.value = true;
       connected.value = true;
+      startReadyTimeout();
     } catch (err) {
       // Graceful degradation (docs/PRD.md §2 — "voice has no spinner,
       // silence is the failure mode"): a denied mic permission or a
@@ -232,6 +274,7 @@ export function useSarjyRoom() {
     agentGreeted.value = false;
     muted.value = false;
     audioBlocked.value = false;
+    clearReadyTimeout();
     stopLevelMeter();
   });
 
@@ -286,7 +329,17 @@ export function useSarjyRoom() {
       (p) => p.identity !== room.localParticipant.identity,
     );
     agentSpeaking.value = speaking;
-    if (speaking) agentGreeted.value = true;
+    if (speaking && !agentGreeted.value) {
+      agentGreeted.value = true;
+      clearReadyTimeout();
+      // Auto-mute from connect() unmutes here, the instant the agent is
+      // actually heard for the first time — only fires once, guarded by
+      // agentGreeted itself, so it never fights the manual Mute button
+      // on a later turn.
+      void room.localParticipant.setMicrophoneEnabled(true).then(() => {
+        muted.value = false;
+      });
+    }
   });
 
   // Fires for both the user's own STT transcript and the agent's
@@ -335,6 +388,9 @@ export function useSarjyRoom() {
     latencyPercentiles,
     awaitingReply,
     agentSpeaking,
+    agentGreeted,
+    ready,
+    slowToStart,
     conversationState,
     audioBlocked,
     resumeAudio,

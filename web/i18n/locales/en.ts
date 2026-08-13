@@ -8,6 +8,8 @@ export default {
   micDenied:
     "Microphone access was blocked. Allow it in your browser and try again.",
   connectFailed: "Couldn't connect. Check your connection and try again.",
+  slowToStart:
+    "Taking longer than usual to get ready — tap here to cancel and try again.",
   audioBlocked:
     "Your browser is blocking audio playback — tap here to hear Sarjy.",
   stop: "Stop",
