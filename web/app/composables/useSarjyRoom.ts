@@ -1,5 +1,5 @@
 // Connects to the LiveKit room the agent joins.
-// TODO(day 1): mute controls, reconnect handling.
+// TODO(day 1): reconnect handling.
 
 import { Room, RoomEvent, Track, type Participant } from "livekit-client";
 
@@ -103,6 +103,18 @@ export function useSarjyRoom() {
     void room.startAudio();
   }
 
+  // Mic stays published for the whole session (always-listening, not
+  // push-to-talk) — mute just stops sending real audio, same primitive
+  // connect() already uses to turn the mic on in the first place, so
+  // there's no separate track-teardown/republish path to get wrong.
+  const muted = ref(false);
+
+  async function toggleMute() {
+    const next = !muted.value;
+    await room.localParticipant.setMicrophoneEnabled(!next);
+    muted.value = next;
+  }
+
   // Real signals only — awaitingReply and agentSpeaking are both driven by
   // room events, never inferred or faked, so this can't drift from what's
   // actually happening.
@@ -175,6 +187,7 @@ export function useSarjyRoom() {
     awaitingReply.value = false;
     agentSpeaking.value = false;
     agentGreeted.value = false;
+    muted.value = false;
     connectedAt = Date.now();
 
     try {
@@ -217,6 +230,7 @@ export function useSarjyRoom() {
     awaitingReply.value = false;
     agentSpeaking.value = false;
     agentGreeted.value = false;
+    muted.value = false;
     audioBlocked.value = false;
     stopLevelMeter();
   });
@@ -313,6 +327,8 @@ export function useSarjyRoom() {
     connectError,
     connect,
     disconnect,
+    muted,
+    toggleMute,
     micLevel,
     transcript,
     latencyStages,
