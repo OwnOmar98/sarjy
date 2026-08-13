@@ -27,6 +27,7 @@ const displayActive = computed(() =>
 const statusLabel = computed(() => {
   if (props.state === "speaking") return t("agentSpeaking");
   if (props.state === "thinking") return t("thinking");
+  if (props.state === "preparing") return t("preparing");
   return t("listening");
 });
 </script>
@@ -126,6 +127,10 @@ const statusLabel = computed(() => {
 .voice-meter--listening
   .voice-meter__cell:nth-child(5):not(.voice-meter__cell--active),
 .voice-meter--listening
+  .voice-meter__cell:nth-child(6):not(.voice-meter__cell--active),
+.voice-meter--preparing
+  .voice-meter__cell:nth-child(5):not(.voice-meter__cell--active),
+.voice-meter--preparing
   .voice-meter__cell:nth-child(6):not(.voice-meter__cell--active) {
   animation: voice-meter-breathe 2.6s ease-in-out infinite;
 }

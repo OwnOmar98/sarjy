@@ -13,6 +13,7 @@ export default {
   stop: "Stop",
   micLevel: "Microphone level",
   you: "You",
+  preparing: "Sarjy is getting ready…",
   listening: "Listening…",
   thinking: "Thinking…",
   agentSpeaking: "Sarjy is speaking…",
