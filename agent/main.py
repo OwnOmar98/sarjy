@@ -8,6 +8,7 @@ loop, deployed. Stubbed pieces are TODO-tagged per docs/PRD.md.
 
 import asyncio
 import logging
+import time
 from collections.abc import AsyncIterable, AsyncIterator
 
 from dotenv import load_dotenv
@@ -20,11 +21,14 @@ from livekit.agents import (
     RoomInputOptions,
     WorkerOptions,
     cli,
+    inference,
     llm,
 )
 from livekit.plugins import noise_cancellation, silero
+from livekit.rtc import AudioFrame
 
 import memory
+import tts_cache
 from latency import LatencyTracker
 from llm_adapter import build_llm
 from stt_adapter import build_stt
@@ -58,6 +62,13 @@ _FALLBACK_MESSAGE = (
     "Sorry, I ran into a problem there — could you try again? "
     "عذرًا، واجهت مشكلة، ممكن تجرب مرة ثانية؟"
 )
+
+# TTS phrase cache candidates (docs/PRD.md §4) — the only text in this
+# codebase that's genuinely fixed turn to turn. Everything else the
+# agent says is LLM-generated and varies per turn, so it was never a
+# cache candidate; caching it would mean matching on content that's
+# different every time, which is a cache that never hits.
+_CACHEABLE_PHRASES = {_FALLBACK_MESSAGE}
 
 
 async def _strip_leaked_tool_syntax(
@@ -110,8 +121,73 @@ async def _strip_leaked_tool_syntax(
         yield llm.ChatChunk(id=last_id, delta=llm.ChoiceDelta(role="assistant", content=pending))
 
 
+def _publish_stage(latency: LatencyTracker, stage: str, seconds: float | None) -> None:
+    # MetricsReport fields (and our own time.monotonic() timings) are in
+    # seconds; some fields are absent for turns they don't apply to (e.g.
+    # tts_node_ttfb on a tool-only reply) — skip those rather than
+    # publishing a misleading 0.
+    if seconds is None:
+        return
+    asyncio.create_task(latency.publish(stage, seconds * 1000))
+
+
+async def _cached_tts_node(
+    agent: Agent, text: AsyncIterable[str], model_settings: ModelSettings
+) -> AsyncIterator[AudioFrame]:
+    text_iter = text.__aiter__()
+    try:
+        first = await text_iter.__anext__()
+    except StopAsyncIteration:
+        return
+
+    if first not in _CACHEABLE_PHRASES:
+        # The overwhelming common case (an LLM-generated reply, never a
+        # cache candidate) — one unavoidable peek at the first chunk to
+        # rule it out, then straight through with no buffering added.
+        async def _passthrough() -> AsyncIterator[str]:
+            yield first
+            async for chunk in text_iter:
+                yield chunk
+
+        async for frame in Agent.default.tts_node(agent, _passthrough(), model_settings):
+            yield frame
+        return
+
+    # A fixed phrase always arrives as a single complete chunk (it's
+    # yielded that way at the source — main.py's own fallback path, e.g.
+    # — never streamed), so confirm the stream actually ends here before
+    # trusting the cache. Without this, a real multi-chunk reply that
+    # merely *starts* with this exact text would get cut off.
+    rest = [chunk async for chunk in text_iter]
+    if rest:
+
+        async def _replay() -> AsyncIterator[str]:
+            yield first
+            for chunk in rest:
+                yield chunk
+
+        async for frame in Agent.default.tts_node(agent, _replay(), model_settings):
+            yield frame
+        return
+
+    cached = await tts_cache.get(first)
+    if cached is not None:
+        yield cached
+        return
+
+    async def _single() -> AsyncIterator[str]:
+        yield first
+
+    frames = []
+    async for frame in Agent.default.tts_node(agent, _single(), model_settings):
+        frames.append(frame)
+        yield frame
+    await tts_cache.store(first, frames)
+
+
 class SarjyAgent(Agent):
-    def __init__(self) -> None:
+    def __init__(self, latency: LatencyTracker) -> None:
+        self._latency = latency
         super().__init__(
             instructions=(
                 "You are Sarjy, a helpful bilingual (Arabic/English) voice "
@@ -153,6 +229,11 @@ class SarjyAgent(Agent):
             Agent.default.llm_node(self, chat_ctx, tools, model_settings)
         )
 
+    def tts_node(
+        self, text: AsyncIterable[str], model_settings: ModelSettings
+    ) -> AsyncIterator[AudioFrame]:
+        return _cached_tts_node(self, text, model_settings)
+
     async def on_user_turn_completed(
         self, turn_ctx: llm.ChatContext, new_message: llm.ChatMessage
     ) -> None:
@@ -161,7 +242,9 @@ class SarjyAgent(Agent):
         text = new_message.text_content
         if not text:
             return
+        start = time.monotonic()
         facts = await memory.retrieve(self.session.userdata, text)
+        _publish_stage(self._latency, "memory", time.monotonic() - start)
         if facts:
             turn_ctx.add_message(
                 role="system",
@@ -174,6 +257,28 @@ def prewarm(proc: JobProcess) -> None:
     # Load VAD once per worker process, not per session.
     proc.userdata["vad"] = silero.VAD.load()
 
+    # TEMPORARY — one-time region probe (docs/PRD.md's open question: is
+    # Groq/Gemini actually routing to a KSA-region facility, or all the
+    # way to the US?). TTFB against a known-us-east-1-only reference for
+    # comparison. Read via `lk agent logs`, then revert this block — not
+    # meant to stay in prewarm() permanently.
+    import time
+
+    import httpx
+
+    for name, url in {
+        "groq": "https://api.groq.com/openai/v1/models",
+        "gemini": "https://generativelanguage.googleapis.com/",
+        "us_reference_dynamodb_useast1": "https://dynamodb.us-east-1.amazonaws.com/",
+    }.items():
+        try:
+            start = time.monotonic()
+            httpx.get(url, timeout=5)
+            elapsed_ms = (time.monotonic() - start) * 1000
+            logger.info("region_probe: %s -> %.0fms", name, elapsed_ms)
+        except Exception:
+            logger.warning("region_probe: %s failed", name, exc_info=True)
+
 
 async def entrypoint(ctx: JobContext) -> None:
     await ctx.connect()
@@ -184,7 +289,7 @@ async def entrypoint(ctx: JobContext) -> None:
     participant = await ctx.wait_for_participant()
     user_id = participant.identity
 
-    latency = LatencyTracker(room=ctx.room)
+    latency = LatencyTracker(room=ctx.room, session_id=ctx.room.name)
 
     # TODO(day 2): swap LLM/TTS per request by language (docs/PRD.md §3-4).
     session = AgentSession[str](
@@ -193,32 +298,55 @@ async def entrypoint(ctx: JobContext) -> None:
         stt=build_stt(ctx.proc.userdata["vad"]),
         llm=build_llm(),
         tts=build_tts(),
-        # TODO(day 2-3): multilingual turn detector — measure AR/EN
-        # code-switching, don't assume (docs/PRD.md "Quality/fidelity").
+        # inference.TurnDetector() is AgentSession's own default when
+        # turn_detection is omitted — set explicitly rather than relying
+        # on that implicit default, since it's core to the AR/EN pillar
+        # (docs/PRD.md "Quality/fidelity") and shouldn't silently change
+        # out from under us on an SDK upgrade. Cloud "v1" model (server-
+        # calibrated per-language thresholds, ar/en both covered) when
+        # LIVEKIT_API_KEY/SECRET are present, as they are here; degrades
+        # to the local "v1-mini" model only if the gateway call fails.
         #
         # Preemptive generation starts an early reply before end-of-turn
-        # is confident, which can produce a reply for a turn the
-        # user hadn't actually finished — off until validated against
-        # the real turn detector above.
-        turn_handling={"preemptive_generation": {"enabled": False}},
+        # is confident, which can produce a reply for a turn the user
+        # hadn't actually finished — off until validated against this.
+        turn_handling={
+            "preemptive_generation": {"enabled": False},
+            "turn_detection": inference.TurnDetector(),
+        },
     )
 
-    latency.attach(session)
+    @session.on("user_input_transcribed")
+    def _on_user_input_transcribed(ev) -> None:
+        # Best-effort language tag for turn_traces (latency.py) — not
+        # every STT provider/model reports one (stt_adapter.py).
+        if ev.language:
+            latency.set_language(ev.language)
 
     @session.on("conversation_item_added")
     def _on_conversation_item_added(ev) -> None:
-        # User-role only: conversation_item_added fires with history's
-        # actual (post-truncation) content, but restricting to the user's
-        # own speech sidesteps the barge-in question entirely — user audio
-        # is never truncated, only an interrupted assistant reply is.
-        if not isinstance(ev.item, llm.ChatMessage) or ev.item.role != "user":
+        if not isinstance(ev.item, llm.ChatMessage):
             return
-        text = ev.item.text_content
-        if text:
-            asyncio.create_task(_remember(user_id, text))
+
+        if ev.item.role == "user":
+            latency.next_turn()
+            _publish_stage(latency, "endpointing", ev.item.metrics.get("end_of_turn_delay"))
+            _publish_stage(latency, "stt", ev.item.metrics.get("transcription_delay"))
+            # conversation_item_added fires with history's actual
+            # (post-truncation) content, but restricting fact extraction
+            # to the user's own speech sidesteps the barge-in question
+            # entirely — user audio is never truncated, only an
+            # interrupted assistant reply is.
+            text = ev.item.text_content
+            if text:
+                asyncio.create_task(_remember(user_id, text))
+        elif ev.item.role == "assistant":
+            _publish_stage(latency, "llm_first_token", ev.item.metrics.get("llm_node_ttft"))
+            _publish_stage(latency, "tts_first_byte", ev.item.metrics.get("tts_node_ttfb"))
+            _publish_stage(latency, "total", ev.item.metrics.get("e2e_latency"))
 
     await session.start(
-        agent=SarjyAgent(),
+        agent=SarjyAgent(latency=latency),
         room=ctx.room,
         room_input_options=RoomInputOptions(
             # Krisp noise cancellation — near-free on LiveKit Cloud.
