@@ -17,6 +17,10 @@ venv/
 .ruff_cache/
 *.egg-info/
 
+# Krisp BVC noise-cancellation SDK writes this in the process's cwd —
+# harmless runtime state, shows up wherever the agent/eval harness runs.
+KMS/
+
 # build intermediates
 docs/PRD.html
 

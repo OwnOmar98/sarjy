@@ -20,5 +20,6 @@ jobs:
           python-version: "3.11"
       - run: pip install -e ".[dev]"
       - run: ruff check .
-      # TODO(day 3): pytest once agent/tests/ exists, then wire eval.yml
-      # for the fixture-based scorecard (docs/PRD.md §2, §7).
+      # TODO(day 3): pytest once agent/tests/ exists.
+      # Latency scorecard lives in .github/workflows/eval.yml (push to
+      # main only — it hits real STT/LLM/TTS provider APIs).
