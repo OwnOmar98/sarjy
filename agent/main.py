@@ -8,6 +8,7 @@ loop, deployed. Stubbed pieces are TODO-tagged per docs/PRD.md.
 
 import asyncio
 import logging
+import re
 import time
 import uuid
 from collections.abc import AsyncIterable, AsyncIterator
@@ -134,6 +135,27 @@ async def _strip_leaked_tool_syntax(
 
     if pending:
         yield llm.ChatChunk(id=last_id, delta=llm.ChoiceDelta(role="assistant", content=pending))
+
+
+_ARABIC_SCRIPT = re.compile(r"[؀-ۿݐ-ݿࢠ-ࣿﭐ-﷿ﹰ-﻿]")
+
+
+def _detect_language(text: str) -> str:
+    # Confirmed live: Groq's whisper-large-v3-turbo never reports a
+    # language on user_input_transcribed at all, even with
+    # detect_language=True — Groq's own API supports verbose_json with a
+    # real language field (tested directly against the API), but
+    # livekit-plugins-openai (which groq.STT subclasses; Groq's endpoint
+    # is OpenAI-compatible) only requests that format for the literal
+    # model name "whisper-1", which Groq never uses. Every turn_traces
+    # row was landing as "unknown" as a result. This scans the transcript
+    # text itself instead — scoped to exactly the two languages this
+    # project supports, not general language ID.
+    if _ARABIC_SCRIPT.search(text):
+        return "ar"
+    if re.search(r"[A-Za-z]", text):
+        return "en"
+    return "unknown"
 
 
 def _publish_stage(latency: LatencyTracker, stage: str, seconds: float | None) -> None:
@@ -351,10 +373,14 @@ async def entrypoint(ctx: JobContext) -> None:
 
     @session.on("user_input_transcribed")
     def _on_user_input_transcribed(ev) -> None:
-        # Best-effort language tag for turn_traces (latency.py) — not
-        # every STT provider/model reports one (stt_adapter.py).
+        # Provider-reported language wins when one is actually given (not
+        # every STT provider/model reports one, see stt_adapter.py); a
+        # script-based guess off the transcript text otherwise (see
+        # _detect_language above).
         if ev.language:
             latency.set_language(ev.language)
+        elif ev.transcript:
+            latency.set_language(_detect_language(ev.transcript))
 
     @session.on("conversation_item_added")
     def _on_conversation_item_added(ev) -> None:
