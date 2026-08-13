@@ -7,12 +7,13 @@ const {
   disconnect,
   micLevel,
   transcript,
+  latencyStages,
+  latencyPercentiles,
   awaitingReply,
   conversationState,
   audioBlocked,
   resumeAudio,
 } = useSarjyRoom();
-const stages: { stage: string; ms: number }[] = [];
 
 const { locale, locales, t, setLocale } = useI18n();
 const currentLocaleDir = computed(
@@ -140,7 +141,11 @@ useHead({
           />
         </div>
 
-        <LatencyHud :stages="stages" class="mt-8" />
+        <LatencyHud
+          :stages="latencyStages"
+          :percentiles="latencyPercentiles"
+          class="mt-8"
+        />
       </v-container>
     </v-main>
   </v-app>

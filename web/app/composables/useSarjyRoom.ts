@@ -1,7 +1,5 @@
 // Connects to the LiveKit room the agent joins.
 // TODO(day 1): mute controls, reconnect handling.
-// TODO(day 2): subscribe to the agent's "latency" topic (agent/latency.py)
-// and feed LatencyHud.vue.
 
 import { Room, RoomEvent, Track, type Participant } from "livekit-client";
 
@@ -28,6 +26,29 @@ export interface TranscriptEntry {
   elapsedMs: number;
 }
 
+export interface LatencyStage {
+  stage: string;
+  ms: number;
+}
+
+export interface LatencyPercentile {
+  stage: string;
+  p50: number;
+  p95: number;
+  n: number;
+}
+
+// Nearest-rank method: sorted[0] for p50 of a single sample, etc. — no
+// interpolation, since these are small samples (a handful of turns per
+// demo session), not a statistics-grade dataset.
+function percentile(sorted: number[], p: number): number {
+  const idx = Math.min(
+    sorted.length - 1,
+    Math.max(0, Math.ceil((p / 100) * sorted.length) - 1),
+  );
+  return sorted[idx]!;
+}
+
 export type ConversationState = "listening" | "thinking" | "speaking";
 export type ConnectError = "mic-denied" | "connect-failed";
 
@@ -37,6 +58,25 @@ export function useSarjyRoom() {
   const connecting = ref(false);
   const connectError = ref<ConnectError | null>(null);
   const transcript = ref<TranscriptEntry[]>([]);
+  const latencyStages = ref<LatencyStage[]>([]);
+  // Every stage value seen this session, keyed by stage name — unlike
+  // latencyStages (reset per turn, for the current-turn waterfall), this
+  // only grows, so p50/p95 (docs/PRD.md §4) reflect the whole session,
+  // not one lucky/unlucky turn.
+  const latencyHistory = ref<Record<string, number[]>>({});
+  const latencyPercentiles = computed<LatencyPercentile[]>(() =>
+    Object.entries(latencyHistory.value)
+      .map(([stage, values]) => {
+        const sorted = [...values].sort((a, b) => a - b);
+        return {
+          stage,
+          p50: percentile(sorted, 50),
+          p95: percentile(sorted, 95),
+          n: sorted.length,
+        };
+      })
+      .sort((a, b) => a.stage.localeCompare(b.stage)),
+  );
   const awaitingReply = ref(false);
   const agentSpeaking = ref(false);
   // Browsers can silently block audio autoplay even after a user gesture
@@ -118,6 +158,8 @@ export function useSarjyRoom() {
     connecting.value = true;
     connectError.value = null;
     transcript.value = [];
+    latencyStages.value = [];
+    latencyHistory.value = {};
     awaitingReply.value = false;
     agentSpeaking.value = false;
     connectedAt = Date.now();
@@ -185,6 +227,29 @@ export function useSarjyRoom() {
     }
   });
 
+  // Per-turn latency waterfall (agent/latency.py). Stages publish from two
+  // different places agent-side (a sync event handler and an async method
+  // awaiting a slower memory.py round-trip) and can arrive in any order —
+  // grouping by the agent's own turn counter, not stage name or arrival
+  // order, is what keeps a same-turn stage from being wiped or misfiled
+  // by a race between them.
+  let currentLatencyTurn = -1;
+  room.on(RoomEvent.DataReceived, (payload, _participant, _kind, topic) => {
+    if (topic !== "latency") return;
+    const { stage, ms, turn } = JSON.parse(
+      new TextDecoder().decode(payload),
+    ) as LatencyStage & {
+      turn: number;
+    };
+    if (turn !== currentLatencyTurn) {
+      currentLatencyTurn = turn;
+      latencyStages.value = [];
+    }
+    const roundedMs = Math.round(ms);
+    latencyStages.value.push({ stage, ms: roundedMs });
+    (latencyHistory.value[stage] ??= []).push(roundedMs);
+  });
+
   // Coarse (SFU-pushed, not per-frame) but it's the only honest signal for
   // "is the agent's voice active right now" — used for the thinking/
   // speaking state label only, never for a fabricated amplitude meter.
@@ -234,6 +299,8 @@ export function useSarjyRoom() {
     disconnect,
     micLevel,
     transcript,
+    latencyStages,
+    latencyPercentiles,
     awaitingReply,
     agentSpeaking,
     conversationState,

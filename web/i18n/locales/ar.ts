@@ -18,5 +18,7 @@ export default {
   transcriptEmpty: "قل شيئًا — سيظهر هنا.",
   latencyHeading: "زمن الاستجابة",
   latencyEmpty: "لا توجد بيانات توقيت بعد.",
+  latencyPercentilesHeading: "زمن الجلسة (p50 / p95)",
+  latencyStageColumn: "المرحلة",
   $vuetify,
 };

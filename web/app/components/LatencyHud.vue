@@ -1,10 +1,17 @@
 <!--
-  Latency waterfall stub (docs/PRD.md §3-4). TODO(day 2): wire to the
-  agent's "latency" room-data topic, rolling window, AR/EN toggle.
+  Latency waterfall (docs/PRD.md §3-4): the current turn's per-stage
+  breakdown, plus a running session p50/p95 per stage below it — the
+  PRD's own target table is p50/p95, not a single turn's numbers, which
+  can be a lucky or unlucky outlier on their own.
   Lattice-cell styling per app.vue's direction-contract comment.
 -->
 <script setup lang="ts">
-defineProps<{ stages: { stage: string; ms: number }[] }>();
+import type {
+  LatencyPercentile,
+  LatencyStage,
+} from "~/composables/useSarjyRoom";
+
+defineProps<{ stages: LatencyStage[]; percentiles: LatencyPercentile[] }>();
 const { t } = useI18n();
 </script>
 
@@ -25,6 +32,30 @@ const { t } = useI18n();
         </div>
       </div>
     </div>
+
+    <template v-if="percentiles.length">
+      <p class="lattice-cells__heading mt-6">
+        {{ t("latencyPercentilesHeading") }}
+      </p>
+      <table class="lattice-table">
+        <thead>
+          <tr>
+            <th class="text-start">{{ t("latencyStageColumn") }}</th>
+            <th class="text-end">p50</th>
+            <th class="text-end">p95</th>
+            <th class="text-end">n</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="p in percentiles" :key="p.stage">
+            <td class="lattice-table__stage">{{ p.stage }}</td>
+            <td class="text-end lattice-table__ms">{{ p.p50 }}ms</td>
+            <td class="text-end lattice-table__ms">{{ p.p95 }}ms</td>
+            <td class="text-end">{{ p.n }}</td>
+          </tr>
+        </tbody>
+      </table>
+    </template>
   </div>
 </template>
 
@@ -72,6 +103,38 @@ const { t } = useI18n();
 .lattice-cells__ms {
   font-family: "IBM Plex Mono", ui-monospace, monospace;
   font-size: 1.1rem;
+  font-weight: 600;
+}
+
+.lattice-table {
+  width: 100%;
+  border: 1px solid rgba(43, 36, 28, 0.16);
+  border-collapse: collapse;
+}
+
+.lattice-table th,
+.lattice-table td {
+  padding: 0.5rem 0.75rem;
+  border: 1px solid rgba(43, 36, 28, 0.1);
+}
+
+.lattice-table th {
+  font-size: 0.7rem;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ink-muted);
+}
+
+.lattice-table__stage {
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ink-muted);
+}
+
+.lattice-table__ms {
+  font-family: "IBM Plex Mono", ui-monospace, monospace;
   font-weight: 600;
 }
 </style>

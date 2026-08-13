@@ -19,5 +19,7 @@ export default {
   transcriptEmpty: "Say something — it'll show up here.",
   latencyHeading: "Latency",
   latencyEmpty: "No timing data yet.",
+  latencyPercentilesHeading: "Session p50 / p95",
+  latencyStageColumn: "Stage",
   $vuetify,
 };
