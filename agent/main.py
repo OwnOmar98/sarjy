@@ -21,6 +21,7 @@ from livekit.agents import (
     JobProcess,
     ModelSettings,
     RoomInputOptions,
+    STTContextOptions,
     WorkerOptions,
     cli,
     inference,
@@ -43,6 +44,7 @@ from tools import (
     list_calendar_events,
     propose_booking,
     propose_cancellation,
+    undo_last_action,
 )
 from tts_adapter import build_tts
 
@@ -82,6 +84,11 @@ _FALLBACK_MESSAGE = (
 _MISSED_SPEECH_MESSAGE = (
     "Sorry, I didn't catch that — could you say it again? عذرًا، لم ألتقط كلامك، ممكن تعيد؟"
 )
+
+# Deliberately longer than transcription_timeout (2.5s) so the SDK's own
+# net always fires first when it is armed; this only ever speaks for a turn
+# that net never covered. See the watchdog in entrypoint() for why one exists.
+_MISSED_SPEECH_WATCHDOG_S = 4.0
 
 # TTS phrase cache candidates (docs/PRD.md §4) — the only text in this
 # codebase that's genuinely fixed turn to turn. Everything else the
@@ -300,7 +307,14 @@ class SarjyAgent(Agent):
                 "changed details means propose again instead of "
                 "confirming. Never call confirm_pending_action without a "
                 "live proposal from this same conversation, and never in "
-                "the same turn the proposal was first made."
+                "the same turn the proposal was first made. After any "
+                "booking or cancellation actually goes through, always say "
+                "back what was written — the title and the time, spoken "
+                "naturally — and mention it can be undone; speech "
+                "recognition can mishear a confirmation, so hearing what "
+                "changed is the user's only way to catch that. If they say "
+                "the change was wrong, or that they never confirmed it, "
+                "call undo_last_action instead of arguing or re-asking."
             ),
             tools=[
                 get_prayer_time,
@@ -309,6 +323,7 @@ class SarjyAgent(Agent):
                 propose_booking,
                 propose_cancellation,
                 confirm_pending_action,
+                undo_last_action,
             ],
         )
 
@@ -353,6 +368,74 @@ class SarjyAgent(Agent):
             )
 
 
+# docs/PRD.md §5's second promise for the memory pillar ("memory feeds ASR
+# vocabulary hints"), previously unbuilt. Remembered facts are the only
+# source of user-specific proper nouns this system has — a colleague's
+# name or a recurring meeting title is exactly what STT mangles and
+# exactly what memory already stores.
+#
+# Honest scope: this reaches whichever configured STT actually advertises
+# the keyterms capability. Groq/Whisper does not (it has only a free-text
+# prompt, and stt_adapter.py documents why that prompt is deliberately
+# minimal), so today this takes effect on the OpenAI fallback and would
+# start applying to the primary if the primary ever changes to a provider
+# with a real term list.
+_KEYTERM_STOPWORDS = {
+    "the",
+    "a",
+    "an",
+    "is",
+    "has",
+    "have",
+    "at",
+    "on",
+    "in",
+    "to",
+    "of",
+    "and",
+    "or",
+    "user",
+    "his",
+    "her",
+    "their",
+    "every",
+    "all",
+    "for",
+    "with",
+    "likes",
+    "prefers",
+    "name",
+    "meeting",
+    "meetings",
+    "favorite",
+}
+_MAX_KEYTERMS = 20
+
+
+def _keyterms_from_facts(facts: list[str]) -> list[str]:
+    """Distinctive terms worth biasing STT toward — proper nouns, not whole facts.
+
+    Latin tokens are taken only when capitalized (a name, not a common word);
+    Arabic has no case, so those are length-filtered instead. Both are crude,
+    which is why the result is capped and why nothing downstream depends on it
+    being right — a wrong keyterm biases one word, it doesn't break a turn.
+    """
+    seen: dict[str, None] = {}
+    for fact in facts:
+        for raw in fact.split():
+            token = raw.strip(".,!?;:'\"()[]—-،؛؟")
+            if len(token) < 3 or token.lower() in _KEYTERM_STOPWORDS:
+                continue
+            if (
+                _ARABIC_SCRIPT.search(token)
+                or token[0].isupper()
+                and token.isascii()
+                and token.isalpha()
+            ):
+                seen.setdefault(token, None)
+    return list(seen)[:_MAX_KEYTERMS]
+
+
 def prewarm(proc: JobProcess) -> None:
     # Load VAD once per worker process, not per session.
     proc.userdata["vad"] = silero.VAD.load()
@@ -384,6 +467,17 @@ async def entrypoint(ctx: JobContext) -> None:
     user_id = _normalize_user_id(participant.identity)
 
     latency = LatencyTracker(room=ctx.room, session_id=ctx.room.name)
+
+    # Retrieved before the session is built, not after start(), because it
+    # now feeds two things: the returning-user greeting (as before) and the
+    # STT keyterm list below, which is a construction-time option. Failure
+    # here must not take the session with it — an unreachable Postgres or
+    # Redis should cost memory, not the whole conversation.
+    try:
+        known_facts = await memory.retrieve(user_id, "facts about the user")
+    except Exception:
+        logger.exception("memory: initial retrieve failed, starting without known facts")
+        known_facts = []
 
     # TODO(day 2): swap LLM/TTS per request by language (docs/PRD.md §3-4).
     session = AgentSession[str](
@@ -418,15 +512,126 @@ async def entrypoint(ctx: JobContext) -> None:
         # is comfortably above worst-case-but-still-arriving before firing
         # on a genuine drop.
         transcription_timeout=2.5,
+        # Static terms only — the framework's LLM-based keyterm detection is
+        # deliberately left off, since it adds a per-turn model call to a
+        # pipeline whose latency is already the weakest measured pillar.
+        stt_context_options=STTContextOptions(keyterms=_keyterms_from_facts(known_facts)),
     )
+
+    # Backstop for the "user spoke, got nothing back at all" issue.
+    #
+    # The SDK's own transcription_timeout above is the primary net, and
+    # reading livekit-agents' source confirms it is armed on *VAD*
+    # end-of-speech and only disarmed by a final transcript with non-empty
+    # text (audio_recognition.py: _arm_transcription_timeout /
+    # _mark_turn_transcribed) — so an empty Whisper result, which
+    # stt.StreamAdapter drops before it ever reaches that layer, is already
+    # covered. What is *not* covered is the case where that timer was never
+    # armed for this turn at all: _arm_transcription_timeout returns early
+    # while _turn_transcript_received is still set from the previous turn,
+    # and that flag is only cleared during end-of-turn cleanup. A second
+    # utterance arriving inside that window has no net.
+    #
+    # This watchdog is driven by user_state_changed instead, which is a
+    # different signal path, and deliberately waits longer than
+    # transcription_timeout so the SDK's own net always gets first refusal.
+    _missed_speech_handle: asyncio.TimerHandle | None = None
+    _transcript_seen = True  # nothing is pending before the first user turn
+
+    # Per-turn speech duration, recorded so the deferred confirmation-evidence
+    # gate (docs/ISSUE_ANALYSIS.md §2) can eventually be decided on a measured
+    # distribution rather than a third guess. Recording only — nothing reads
+    # this to make a decision, deliberately: the previous attempt at that gate
+    # was removed for thresholding a signal nobody had characterised, and the
+    # fix for that is data, not a better guess.
+    #
+    # It is a *proxy*, and the name says so. livekit-agents exposes no
+    # per-turn VAD speech duration on the success path — `speech_duration`
+    # rides only on UserTranscriptionTimeoutEvent, i.e. the failure path — so
+    # this measures wall-clock between the user_state_changed transitions
+    # instead. That includes Silero's own hangover (min_silence_duration,
+    # 0.55s default) plus event dispatch, so it reads high by a roughly
+    # constant amount. Constant is what matters here: both populations being
+    # compared (a genuine short confirmation vs. an affirmative hallucinated
+    # onto noise) carry the same offset, so the *separation* between them is
+    # measurable even though neither absolute value is.
+    _speech_started_at: float | None = None
+
+    def _publish_speech_duration_proxy() -> None:
+        nonlocal _speech_started_at
+        if _speech_started_at is None:
+            return
+        _publish_stage(latency, "speech_duration_proxy", time.monotonic() - _speech_started_at)
+        _speech_started_at = None
+
+    def _cancel_missed_speech_watchdog() -> None:
+        nonlocal _missed_speech_handle
+        if _missed_speech_handle is not None:
+            _missed_speech_handle.cancel()
+            _missed_speech_handle = None
+
+    def _note_transcript_seen() -> None:
+        # A flag as well as a cancel, because event ordering isn't
+        # guaranteed: a transcript can land before the VAD state has
+        # finished transitioning out of "speaking", and cancelling a timer
+        # that hasn't been armed yet would leave the later arm running with
+        # nothing to stop it — a spurious "I didn't catch that" over a turn
+        # that was heard perfectly well.
+        nonlocal _transcript_seen
+        _transcript_seen = True
+        _cancel_missed_speech_watchdog()
+
+    def _on_missed_speech_deadline() -> None:
+        nonlocal _missed_speech_handle
+        _missed_speech_handle = None
+        if _transcript_seen:
+            return
+        # Only speak when the agent is genuinely idle. Any other state
+        # ("thinking", "speaking") means this turn is already being handled
+        # — a slow LLM is not a dropped utterance.
+        if session.agent_state != "listening":
+            logger.debug("watchdog: skipped, agent_state=%s", session.agent_state)
+            return
+        logger.warning(
+            "watchdog: user speech ended with no transcript and no SDK timeout — "
+            "replying with the missed-speech prompt"
+        )
+        session.say(_MISSED_SPEECH_MESSAGE)
+
+    @session.on("user_state_changed")
+    def _on_user_state_changed(ev) -> None:
+        nonlocal _missed_speech_handle, _transcript_seen, _speech_started_at
+        if ev.new_state == "speaking":
+            # VAD did fire for this turn — which is itself the diagnostic
+            # separating "STT dropped it" from "VAD never saw it" for the
+            # silent-utterance issue (docs/KNOWN_ISSUES.md #4).
+            logger.debug("watchdog: user speech started")
+            _transcript_seen = False
+            _speech_started_at = time.monotonic()
+            _cancel_missed_speech_watchdog()
+            return
+
+        if ev.old_state == "speaking":
+            _publish_speech_duration_proxy()
+            if _transcript_seen:
+                return
+            _cancel_missed_speech_watchdog()
+            _missed_speech_handle = asyncio.get_running_loop().call_later(
+                _MISSED_SPEECH_WATCHDOG_S, _on_missed_speech_deadline
+            )
 
     @session.on("user_transcription_timeout")
     def _on_user_transcription_timeout(ev) -> None:
+        # The SDK's own net handled this turn — suppress the watchdog so the
+        # apology is spoken once, not twice.
+        _note_transcript_seen()
         logger.warning("user spoke (%.2fs) but no transcript arrived in time", ev.speech_duration)
         session.say(_MISSED_SPEECH_MESSAGE)
 
     @session.on("user_input_transcribed")
     def _on_user_input_transcribed(ev) -> None:
+        if ev.transcript:
+            _note_transcript_seen()
         # Provider-reported language wins when one is actually given (not
         # every STT provider/model reports one, see stt_adapter.py); a
         # script-based guess off the transcript text otherwise (see
@@ -467,19 +672,28 @@ async def entrypoint(ctx: JobContext) -> None:
         ),
     )
 
-    # on_user_turn_completed (above) only fires from the second turn
-    # onward — the greeting is generated before any user turn exists, so
-    # a returning user needs this same retrieve() call run once up front.
+    # known_facts was retrieved before the session was constructed (it also
+    # feeds stt_context_options above). on_user_turn_completed only fires
+    # from the second turn onward — the greeting is generated before any
+    # user turn exists, so a returning user needs that one up-front call.
     # Broad query ("facts about the user", not just "the user's name") so
     # a returning user who never stated their name still counts as known.
-    known_facts = await memory.retrieve(user_id, "facts about the user")
     if known_facts:
         # extract_facts() (memory.py) normalizes each fact into whichever
         # language reads best — reused here as a free, already-available
         # signal for which language this user tends to speak, rather than
         # tracking a separate explicit preference.
+        # detect_code_switch(), not _detect_language() — the latter is
+        # Arabic-first by design (a single Arabic character anywhere tags
+        # the whole string "ar"), which is fine for the coarse turn_traces
+        # presence flag it exists for, but wrong here: one Arabic proper
+        # noun in an otherwise-English set of remembered facts would have
+        # greeted an English-speaking user in Arabic. This counts tokens
+        # and picks whichever language actually dominates.
         preferred_language = (
-            "Arabic" if _detect_language(" ".join(known_facts)) == "ar" else "English"
+            "Arabic"
+            if detect_code_switch(" ".join(known_facts)).primary_language == "ar"
+            else "English"
         )
         greeting_instructions = (
             f"Greet this returning user briefly in {preferred_language} — they "

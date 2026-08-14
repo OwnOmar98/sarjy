@@ -48,7 +48,14 @@ _EXTRACT_SYSTEM_PROMPT = (
     "plans. A stated preference or standing rule is durable no matter how "
     'it\'s phrased — a want, a "should", an always/never statement, a '
     '"please only ever" request — judge it by whether it describes an '
-    "ongoing pattern to remember, not by the literal wording used. Ignore "
+    "ongoing pattern to remember, not by the literal wording used. A "
+    'universal word — all, every, any, كل — makes even a bare "want" a '
+    'standing rule rather than a one-off: "I want all X to be Y" '
+    "describes an ongoing pattern and is durable, while the same sentence "
+    "without that universal word may not be. (Stated as a shape on "
+    "purpose, not as a worked example — a concrete example sentence in "
+    "this prompt gets echoed verbatim onto unrelated input, which is a "
+    "real failure this prompt already hit once.) Ignore "
     'one-off requests about right now (e.g. "book it for 3pm today" is '
     'not durable, but "I never want meetings before 3pm" is), small '
     'talk, and anything transient ("what\'s the weather"). The message '
