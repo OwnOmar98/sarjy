@@ -10,6 +10,9 @@ the LiveKit participant identity), the same per-browser id
 agent/memory.py keys facts on.
 """
 
+import time
+import uuid
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Literal
 from zoneinfo import ZoneInfo
@@ -210,13 +213,90 @@ async def list_calendar_events(context: RunContext, date: str = "today") -> str:
     return f"On {day_start.date().isoformat()}: {events}."
 
 
+# Booking/cancellation is a propose-then-confirm state machine, not a
+# single write tool the LLM decides when to call — reliability moved out
+# of prompt compliance and into code that physically can't write without
+# a matching prior proposal in this same conversation. In-memory, keyed
+# by user_id, one pending action per user (a new propose overwrites an
+# unconfirmed one — matches how a real conversation actually flows).
+_PENDING_TTL_S = 300  # a stale confirm long after the conversation moved on shouldn't fire
+
+
+@dataclass
+class _PendingBooking:
+    title: str
+    start: datetime
+    duration_minutes: int
+    created_at: float
+
+
+@dataclass
+class _PendingCancellation:
+    event_id: str
+    title: str
+    start: datetime
+    created_at: float
+
+
+_pending: dict[str, "_PendingBooking | _PendingCancellation"] = {}
+
+
 @function_tool
-async def cancel_calendar_event(
+async def propose_booking(
+    context: RunContext, title: str, start_time: str, duration_minutes: int | str | None = 30
+) -> str:
+    """Propose booking a calendar event — checks availability but does
+    not book anything yet. Call confirm_pending_action once the user
+    actually confirms.
+
+    Args:
+        title: Event title.
+        start_time: ISO 8601 start time, or the ISO value from get_prayer_time.
+        duration_minutes: Event length in minutes.
+    """
+    user_id = context.userdata
+    try:
+        start = _parse_start_time(start_time)
+    except ValueError:
+        return (
+            f"'{start_time}' isn't a specific time — ask the user for an "
+            "exact time (a clock time, or after a named prayer) and try again."
+        )
+    duration_minutes = _coerce_minutes(duration_minutes)
+    end = start + timedelta(minutes=duration_minutes)
+
+    pool = await get_pool()
+    rows = await pool.fetch(
+        "select title, start_time from calendar_events "
+        "where user_id = $1 and start_time < $2 "
+        "and start_time + (duration_minutes::text || ' minutes')::interval > $3",
+        user_id,
+        end,
+        start,
+    )
+    if rows:
+        conflicts = "; ".join(
+            f"'{r['title']}' at {_to_local(r['start_time']).isoformat()}" for r in rows
+        )
+        return f"Not free — conflicts with: {conflicts}. Ask for a different time."
+
+    _pending[user_id] = _PendingBooking(
+        title=title, start=start, duration_minutes=duration_minutes, created_at=time.monotonic()
+    )
+    return (
+        f"Free. Proposed: '{title}' at {start.isoformat()} for {duration_minutes} minutes — "
+        "relay this to the user and call confirm_pending_action once they actually confirm."
+    )
+
+
+@function_tool
+async def propose_cancellation(
     context: RunContext, start_time: str, title: str | None = None
 ) -> str:
-    """Cancel/delete a calendar event. If you don't already know its exact
-    start time, call list_calendar_events or check_calendar_availability
-    first to find it — never guess a time just to cancel something.
+    """Propose cancelling a calendar event — does not delete anything
+    yet. If you don't already know its exact start time, call
+    list_calendar_events or check_calendar_availability first to find
+    it — never guess a time just to cancel something.
 
     Args:
         start_time: ISO 8601 start time of the event to cancel — must
@@ -263,44 +343,48 @@ async def cancel_calendar_event(
         return f"More than one event matches — ask the user which one: {options}"
 
     event = rows[0]
-    await pool.execute("delete from calendar_events where id = $1", event["id"])
-    return f"Cancelled '{event['title']}' at {_to_local(event['start_time']).isoformat()}."
+    _pending[user_id] = _PendingCancellation(
+        event_id=str(event["id"]),
+        title=event["title"],
+        start=event["start_time"],
+        created_at=time.monotonic(),
+    )
+    return (
+        f"Proposed cancelling '{event['title']}' at {_to_local(event['start_time']).isoformat()} — "
+        "relay this to the user and call confirm_pending_action once they actually confirm."
+    )
 
 
 @function_tool
-async def book_calendar_event(
-    context: RunContext, title: str, start_time: str, duration_minutes: int | str | None = 30
-) -> str:
-    """Book a calendar event. Check availability first if it's not already known.
-
-    Args:
-        title: Event title.
-        start_time: ISO 8601 start time, or the ISO value from get_prayer_time.
-        duration_minutes: Event length in minutes.
+async def confirm_pending_action(context: RunContext) -> str:
+    """Actually execute the previously proposed booking or cancellation.
+    Only call this after the user gave a real, clear yes to what
+    propose_booking/propose_cancellation just described — never call it
+    speculatively or without a live proposal from this same conversation.
     """
     user_id = context.userdata
-    try:
-        start = _parse_start_time(start_time)
-    except ValueError:
-        return (
-            f"'{start_time}' isn't a specific time — ask the user for an "
-            "exact time (a clock time, or after a named prayer) and try again."
-        )
-    duration_minutes = _coerce_minutes(duration_minutes)
+    entry = _pending.pop(user_id, None)
+    if entry is None:
+        return "Nothing is pending to confirm — propose a booking or cancellation first."
+    if time.monotonic() - entry.created_at > _PENDING_TTL_S:
+        return "That proposal has expired — propose it again."
 
     pool = await get_pool()
-    async with pool.acquire() as conn, conn.transaction():
-        # calendar_events.user_id FK's users.id — lazily create the row
-        # rather than requiring every caller to remember to do it first
-        # (same pattern as memory.py's store()).
-        await conn.execute("insert into users (id) values ($1) on conflict do nothing", user_id)
-        await conn.execute(
-            "insert into calendar_events (user_id, title, start_time, duration_minutes) "
-            "values ($1, $2, $3, $4)",
-            user_id,
-            title,
-            start,
-            duration_minutes,
-        )
+    if isinstance(entry, _PendingBooking):
+        async with pool.acquire() as conn, conn.transaction():
+            # calendar_events.user_id FK's users.id — lazily create the row
+            # rather than requiring every caller to remember to do it first
+            # (same pattern as memory.py's store()).
+            await conn.execute("insert into users (id) values ($1) on conflict do nothing", user_id)
+            await conn.execute(
+                "insert into calendar_events (user_id, title, start_time, duration_minutes) "
+                "values ($1, $2, $3, $4)",
+                user_id,
+                entry.title,
+                entry.start,
+                entry.duration_minutes,
+            )
+        return f"Booked '{entry.title}' at {entry.start.isoformat()} for {entry.duration_minutes} minutes."
 
-    return f"Booked '{title}' at {start.isoformat()} for {duration_minutes} minutes."
+    await pool.execute("delete from calendar_events where id = $1", uuid.UUID(entry.event_id))
+    return f"Cancelled '{entry.title}' at {_to_local(entry.start).isoformat()}."
