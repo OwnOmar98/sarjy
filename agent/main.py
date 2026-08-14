@@ -57,6 +57,22 @@ logger = logging.getLogger("sarjy-agent")
 # resolve to the same calendar date the booking tools will parse.
 _DEFAULT_TZ = ZoneInfo("Asia/Riyadh")
 
+# asyncio.create_task() only holds a weak reference to the task it returns —
+# without something else holding a strong reference, the event loop is free
+# to garbage-collect it mid-execution, silently dropping whatever it was
+# doing (confirmed live: a fact-extraction call cut short this way, storing
+# "name is Owen" but losing "favorite color is blue" from the very next
+# sentence). Every fire-and-forget task in this file goes through here so
+# none of them are silently GC'd mid-flight.
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _fire_and_forget(coro) -> None:
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+
 # Groq/llama-3.3-70b-versatile occasionally writes a tool call as literal
 # text (e.g. "<function=check_calendar_availability>{...}</function>")
 # instead of using the real tool-calling mechanism — it gets spoken and
@@ -197,7 +213,7 @@ def _publish_stage(latency: LatencyTracker, stage: str, seconds: float | None) -
     # publishing a misleading 0.
     if seconds is None:
         return
-    asyncio.create_task(latency.publish(stage, seconds * 1000))
+    _fire_and_forget(latency.publish(stage, seconds * 1000))
 
 
 async def _cached_tts_node(
@@ -366,9 +382,9 @@ class SarjyAgent(Agent):
         # language_detect.py works off the plain transcript text, not
         # anything STT provides — Groq never reliably reports even a
         # single per-utterance language field (confirmed live: ev.language
-        # is empty on every real turn). Only injected when genuinely
-        # mixed; a single-language turn is already covered by this
-        # class's own three-mode language-response instructions.
+        # is empty on every real turn). Injected on every turn, mixed or
+        # not — see describe_for_llm's docstring for why a single-language
+        # turn needs this too, not just genuinely mixed ones.
         if lang_context := describe_for_llm(detect_code_switch(text)):
             turn_ctx.add_message(role="system", content=lang_context)
 
@@ -672,7 +688,7 @@ async def entrypoint(ctx: JobContext) -> None:
             # interrupted assistant reply is.
             text = ev.item.text_content
             if text:
-                asyncio.create_task(_remember(user_id, text))
+                _fire_and_forget(_remember(user_id, text))
         elif ev.item.role == "assistant":
             _publish_stage(latency, "llm_first_token", ev.item.metrics.get("llm_node_ttft"))
             _publish_stage(latency, "tts_first_byte", ev.item.metrics.get("tts_node_ttfb"))
