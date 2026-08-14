@@ -1,0 +1,18 @@
+app = "sarjy-agent-worker"
+primary_region = "iad"
+
+[build]
+
+[env]
+  # Groq's daily token quota for llama-3.3-70b-versatile is a real, easily
+  # exhausted cap on the free tier, and its FallbackAdapter recovery path
+  # doesn't reliably hand off to OpenAI when it's hit (see docs/KNOWN_ISSUES.md)
+  # — OpenAI primary avoids that failure mode. Not a secret, checked in.
+  LLM_PROVIDER = "openai"
+
+[[vm]]
+  size = "shared-cpu-2x"
+  memory = "4gb"
+
+[[restart]]
+  policy = "always"

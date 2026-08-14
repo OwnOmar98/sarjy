@@ -10,10 +10,15 @@ comparable even at the same dimensionality). retrieve() is Redis-cached
 — per §5 memory also feeds STT vocabulary hints, so it's called on every
 user turn (main.py), not just occasionally.
 
-extract_facts() tries Groq first, falls back to OpenAI on failure — the
-same "don't get blocked by one provider's rate limit" reasoning as
-stt_adapter.py/llm_adapter.py, just as a manual try/except here since
-this is a standalone function call, not an AgentSession component.
+extract_facts() tries OpenAI first, falls back to Groq on failure.
+OpenAI is primary here (unlike llm_adapter.py's Groq-first order) because
+Groq's cheap extraction model (llama-3.1-8b-instant) was verified to
+silently return "[]" — a clean, non-exception response, so the old
+Groq-first/OpenAI-fallback order never caught it — for the two most
+common fact categories a user states: name and favorite-thing. OpenAI's
+gpt-5.4-mini got every tested case right. Groq stays as the fallback
+for resilience against an OpenAI outage, not for cost — see
+docs/KNOWN_ISSUES.md.
 
 Barge-in truncation (§5: never record a fact from text the user didn't
 actually hear) doesn't need separate handling here — extract_facts()
@@ -115,13 +120,13 @@ async def extract_facts(user_id: str, transcript: str) -> list[str]:
         {"role": "user", "content": transcript},
     ]
     try:
-        resp = await _get_groq().chat.completions.create(
-            model=_GROQ_EXTRACT_MODEL, messages=messages, temperature=0
-        )
-    except Exception:
-        logger.warning("extract_facts: Groq failed, falling back to OpenAI", exc_info=True)
         resp = await _get_openai().chat.completions.create(
             model=_OPENAI_EXTRACT_MODEL, messages=messages, temperature=0
+        )
+    except Exception:
+        logger.warning("extract_facts: OpenAI failed, falling back to Groq", exc_info=True)
+        resp = await _get_groq().chat.completions.create(
+            model=_GROQ_EXTRACT_MODEL, messages=messages, temperature=0
         )
     return _parse_facts_response(resp.choices[0].message.content)
 

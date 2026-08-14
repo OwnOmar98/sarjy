@@ -12,6 +12,8 @@ import re
 import time
 import uuid
 from collections.abc import AsyncIterable, AsyncIterator
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from dotenv import load_dotenv
 from livekit.agents import (
@@ -50,6 +52,10 @@ from tts_adapter import build_tts
 
 load_dotenv()
 logger = logging.getLogger("sarjy-agent")
+
+# Must match tools.py's _DEFAULT_TZ — the model needs "today"/"tomorrow" to
+# resolve to the same calendar date the booking tools will parse.
+_DEFAULT_TZ = ZoneInfo("Asia/Riyadh")
 
 # Groq/llama-3.3-70b-versatile occasionally writes a tool call as literal
 # text (e.g. "<function=check_calendar_availability>{...}</function>")
@@ -257,8 +263,17 @@ async def _cached_tts_node(
 class SarjyAgent(Agent):
     def __init__(self, latency: LatencyTracker) -> None:
         self._latency = latency
+        now = datetime.now(_DEFAULT_TZ)
         super().__init__(
             instructions=(
+                f"Right now it is {now.strftime('%A, %Y-%m-%d, %H:%M')} "
+                "(Asia/Riyadh time) — use this to resolve 'today', "
+                "'tomorrow', or a weekday name into an actual calendar "
+                "date yourself before calling propose_booking, "
+                "check_calendar_availability, or propose_cancellation; "
+                "never ask the user to restate a date/time that's already "
+                "unambiguous just because you need to convert it to ISO "
+                "8601 yourself. "
                 "You are Sarjy, a helpful bilingual (Arabic/English) voice "
                 "assistant. Judge the language of the user's last message "
                 "as a whole and reply in one of three modes: mostly "
