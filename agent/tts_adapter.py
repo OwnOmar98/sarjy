@@ -13,7 +13,10 @@ matches the original behavior before this file grew a real fallback).
 If only one provider has a key, there's nothing to fall back to, same
 as before.
 
-TODO(day 1-2): Arabic TTS normalization (docs/PRD.md §2) hooks in here.
+Arabic TTS text normalization (docs/PRD.md §2) lives in
+agent/arabic_normalize.py, hooked into main.py's _cached_tts_node
+rather than here — it needs to run on the LLM's generated text right
+before synthesis, not on provider selection.
 """
 
 import os
