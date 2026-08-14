@@ -211,6 +211,63 @@ async def list_calendar_events(context: RunContext, date: str = "today") -> str:
 
 
 @function_tool
+async def cancel_calendar_event(
+    context: RunContext, start_time: str, title: str | None = None
+) -> str:
+    """Cancel/delete a calendar event. If you don't already know its exact
+    start time, call list_calendar_events or check_calendar_availability
+    first to find it — never guess a time just to cancel something.
+
+    Args:
+        start_time: ISO 8601 start time of the event to cancel — must
+            match an existing event (e.g. the value list_calendar_events
+            returned for it).
+        title: Optional — narrows the match if more than one event starts
+            at the same time.
+    """
+    user_id = context.userdata
+    try:
+        start = _parse_start_time(start_time)
+    except ValueError:
+        return (
+            f"'{start_time}' isn't a specific time — ask the user for an exact time and try again."
+        )
+
+    pool = await get_pool()
+    if title:
+        rows = await pool.fetch(
+            "select id, title, start_time from calendar_events "
+            "where user_id = $1 and start_time = $2 and title ilike $3",
+            user_id,
+            start,
+            f"%{title}%",
+        )
+    else:
+        rows = await pool.fetch(
+            "select id, title, start_time from calendar_events "
+            "where user_id = $1 and start_time = $2",
+            user_id,
+            start,
+        )
+
+    if not rows:
+        return (
+            f"No event found at {start.isoformat()}"
+            + (f" matching '{title}'" if title else "")
+            + " — call list_calendar_events to find the exact time first."
+        )
+    if len(rows) > 1:
+        options = "; ".join(
+            f"'{r['title']}' at {_to_local(r['start_time']).isoformat()}" for r in rows
+        )
+        return f"More than one event matches — ask the user which one: {options}"
+
+    event = rows[0]
+    await pool.execute("delete from calendar_events where id = $1", event["id"])
+    return f"Cancelled '{event['title']}' at {_to_local(event['start_time']).isoformat()}."
+
+
+@function_tool
 async def book_calendar_event(
     context: RunContext, title: str, start_time: str, duration_minutes: int | str | None = 30
 ) -> str:

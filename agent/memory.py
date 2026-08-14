@@ -45,11 +45,19 @@ _openai: AsyncOpenAI | None = None
 _EXTRACT_SYSTEM_PROMPT = (
     "Extract durable facts about the user from their message — things worth "
     "remembering next session: preferences, names, relationships, recurring "
-    "plans. Ignore one-off questions, small talk, and anything transient "
-    '("what\'s the weather"). Reply with ONLY a JSON array of short factual '
-    "statements, in the same language the user spoke, e.g. "
-    '["favorite color is blue", "has a meeting every Sunday"]. '
-    "If nothing durable was said, reply with []."
+    "plans. A stated preference or standing rule is durable no matter how "
+    'it\'s phrased — a want, a "should", an always/never statement, a '
+    '"please only ever" request — judge it by whether it describes an '
+    "ongoing pattern to remember, not by the literal wording used. Ignore "
+    'one-off requests about right now (e.g. "book it for 3pm today" is '
+    'not durable, but "I never want meetings before 3pm" is), small '
+    'talk, and anything transient ("what\'s the weather"). The message '
+    "may be in Arabic, English, or a mix of both — normalize each fact "
+    "into a single clear, natural sentence in whichever language reads "
+    "best, rather than preserving code-switched phrasing verbatim; keep "
+    "names and other proper nouns as spoken. Reply with ONLY a JSON array "
+    'of short factual statements, e.g. ["favorite color is blue", "has a '
+    'meeting every Sunday"]. If nothing durable was said, reply with [].'
 )
 
 
