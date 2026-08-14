@@ -59,11 +59,20 @@ def detect_code_switch(text: str) -> SpeechMetadata:
 
 
 def describe_for_llm(meta: SpeechMetadata) -> str | None:
-    """A short system-context line for on_user_turn_completed — only worth injecting
-    when there's genuine code-switching to flag; a single-language turn is already
-    handled by SarjyAgent's own three-mode language policy."""
-    if not meta.mixed or meta.primary_language is None:
+    """A short system-context line for on_user_turn_completed, stating the
+    detected language for every turn — not just mixed ones. Used to be
+    mixed-only, on the assumption that a single-language turn was already
+    covered by SarjyAgent's own three-mode language policy; confirmed live
+    that assumption is wrong. A plain "Yes." following an earlier
+    Arabic-language confirmation got answered in Arabic 3/3 reproductions
+    — the model anchored on the language of its own most recent reply
+    instead of the current turn's, and adding more instructions about
+    judging language "fresh" didn't fix it. An explicit per-turn tag did,
+    5/5 in testing, so every turn gets one now."""
+    if meta.primary_language is None:
         return None
+    if not meta.mixed:
+        return f"Detected speech language for this turn: {_LANGUAGE_NAMES[meta.primary_language]}."
     secondary = [lang for lang in meta.languages if lang != meta.primary_language]
     return (
         "Detected speech language for this turn — primary: "
