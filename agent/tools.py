@@ -235,10 +235,57 @@ class _PendingCancellation:
     event_id: str
     title: str
     start: datetime
+    duration_minutes: int
     created_at: float
 
 
 _pending: dict[str, "_PendingBooking | _PendingCancellation"] = {}
+
+# Every mitigation that tries to *detect* a false confirmation upstream has
+# been tested and rejected (docs/HANDOFF.md): Whisper's own no_speech_prob
+# reads 0.0 on the exact clips that hallucinated "نعم", raising the VAD's
+# min_speech_duration silences genuine short words, and dropping "نعم" from
+# the STT prompt regresses real "نعم" transcription reproducibly. So this
+# is deliberately not another detector — it accepts that a wrong write can
+# happen and makes it reversible in one utterance instead of permanent.
+# Kept in memory alongside _pending, same lifetime and same keying.
+_UNDO_TTL_S = 900
+
+
+@dataclass
+class _CompletedBooking:
+    event_id: str
+    title: str
+    start: datetime
+    completed_at: float
+
+
+@dataclass
+class _CompletedCancellation:
+    event_id: str
+    title: str
+    start: datetime
+    duration_minutes: int
+    completed_at: float
+
+
+_last_action: dict[str, "_CompletedBooking | _CompletedCancellation"] = {}
+
+
+def _expire_stale(store: dict, ttl_s: float, stamp_attr: str) -> None:
+    """Drop entries past their TTL.
+
+    Both stores are module-level and keyed by user_id, and a worker process
+    is long-lived and serves many users — without this, a user who proposes
+    a booking and never confirms it (or confirms and never undoes) leaves an
+    entry behind for the life of the process. Both are already TTL-checked
+    on read, so this changes no behaviour; it just stops the dicts growing
+    without bound. Swept lazily on each propose/confirm rather than on a
+    timer, since there is no other thread to run one on.
+    """
+    now = time.monotonic()
+    for key in [k for k, v in store.items() if now - getattr(v, stamp_attr) > ttl_s]:
+        del store[key]
 
 
 @function_tool
@@ -315,16 +362,21 @@ async def propose_cancellation(
 
     pool = await get_pool()
     if title:
+        # Whitespace-insensitive match: STT routinely drops or adds a space
+        # inside a two-word title ("TeamSync" for a booked "Team Sync"), and
+        # a plain ilike '%Team Sync%' then finds nothing, sending the model
+        # off to re-list the day's events for a title it already had right.
         rows = await pool.fetch(
-            "select id, title, start_time from calendar_events "
-            "where user_id = $1 and start_time = $2 and title ilike $3",
+            "select id, title, start_time, duration_minutes from calendar_events "
+            "where user_id = $1 and start_time = $2 "
+            "and replace(lower(title), ' ', '') like $3",
             user_id,
             start,
-            f"%{title}%",
+            f"%{title.lower().replace(' ', '')}%",
         )
     else:
         rows = await pool.fetch(
-            "select id, title, start_time from calendar_events "
+            "select id, title, start_time, duration_minutes from calendar_events "
             "where user_id = $1 and start_time = $2",
             user_id,
             start,
@@ -347,6 +399,7 @@ async def propose_cancellation(
         event_id=str(event["id"]),
         title=event["title"],
         start=event["start_time"],
+        duration_minutes=event["duration_minutes"],
         created_at=time.monotonic(),
     )
     return (
@@ -363,6 +416,8 @@ async def confirm_pending_action(context: RunContext) -> str:
     speculatively or without a live proposal from this same conversation.
     """
     user_id = context.userdata
+    _expire_stale(_pending, _PENDING_TTL_S, "created_at")
+    _expire_stale(_last_action, _UNDO_TTL_S, "completed_at")
     entry = _pending.pop(user_id, None)
     if entry is None:
         return "Nothing is pending to confirm — propose a booking or cancellation first."
@@ -376,15 +431,97 @@ async def confirm_pending_action(context: RunContext) -> str:
             # rather than requiring every caller to remember to do it first
             # (same pattern as memory.py's store()).
             await conn.execute("insert into users (id) values ($1) on conflict do nothing", user_id)
-            await conn.execute(
+            event_id = await conn.fetchval(
                 "insert into calendar_events (user_id, title, start_time, duration_minutes) "
-                "values ($1, $2, $3, $4)",
+                "values ($1, $2, $3, $4) returning id",
                 user_id,
                 entry.title,
                 entry.start,
                 entry.duration_minutes,
             )
-        return f"Booked '{entry.title}' at {entry.start.isoformat()} for {entry.duration_minutes} minutes."
+        _last_action[user_id] = _CompletedBooking(
+            event_id=str(event_id),
+            title=entry.title,
+            start=entry.start,
+            completed_at=time.monotonic(),
+        )
+        return (
+            f"Booked '{entry.title}' at {entry.start.isoformat()} for "
+            f"{entry.duration_minutes} minutes. Say this back to the user as a natural "
+            "spoken sentence so they can hear exactly what was written, and tell them "
+            "they can ask you to undo it if that isn't what they meant."
+        )
 
     await pool.execute("delete from calendar_events where id = $1", uuid.UUID(entry.event_id))
-    return f"Cancelled '{entry.title}' at {_to_local(entry.start).isoformat()}."
+    _last_action[user_id] = _CompletedCancellation(
+        event_id=entry.event_id,
+        title=entry.title,
+        start=entry.start,
+        duration_minutes=entry.duration_minutes,
+        completed_at=time.monotonic(),
+    )
+    return (
+        f"Cancelled '{entry.title}' at {_to_local(entry.start).isoformat()}. Say this back "
+        "to the user as a natural spoken sentence so they can hear exactly what was "
+        "removed, and tell them they can ask you to undo it if that isn't what they meant."
+    )
+
+
+@function_tool
+async def undo_last_action(context: RunContext) -> str:
+    """Reverse the booking or cancellation that was just carried out — call
+    this whenever the user says the last change was wrong or wasn't what
+    they asked for ("undo that", "I didn't say yes", "تراجع", "ما قلت نعم").
+    Only the most recent completed action can be undone, and only shortly
+    after it happened.
+    """
+    user_id = context.userdata
+    _expire_stale(_last_action, _UNDO_TTL_S, "completed_at")
+    entry = _last_action.pop(user_id, None)
+    if entry is None:
+        return (
+            "There's no recent booking or cancellation to undo. Tell the user, and offer "
+            "to list their calendar if they want to check what's on it."
+        )
+    if time.monotonic() - entry.completed_at > _UNDO_TTL_S:
+        return (
+            "That change is too old to undo automatically. Tell the user, and offer to "
+            "book or cancel it directly instead."
+        )
+
+    pool = await get_pool()
+    if isinstance(entry, _CompletedBooking):
+        # Delete by the id this booking actually wrote, not by time+title —
+        # a later booking in the same slot must never be the one removed.
+        deleted = await pool.execute(
+            "delete from calendar_events where id = $1 and user_id = $2",
+            uuid.UUID(entry.event_id),
+            user_id,
+        )
+        if deleted.endswith(" 0"):
+            return (
+                f"'{entry.title}' was already gone — nothing to undo. Tell the user it's "
+                "no longer on their calendar."
+            )
+        return (
+            f"Undone — '{entry.title}' at {_to_local(entry.start).isoformat()} is no longer "
+            "booked. Confirm that to the user in one short natural sentence."
+        )
+
+    async with pool.acquire() as conn, conn.transaction():
+        await conn.execute("insert into users (id) values ($1) on conflict do nothing", user_id)
+        # Restore the original row id so a second undo can't resurrect a
+        # duplicate, and so anything else holding that id still resolves.
+        await conn.execute(
+            "insert into calendar_events (id, user_id, title, start_time, duration_minutes) "
+            "values ($1, $2, $3, $4, $5) on conflict (id) do nothing",
+            uuid.UUID(entry.event_id),
+            user_id,
+            entry.title,
+            entry.start,
+            entry.duration_minutes,
+        )
+    return (
+        f"Undone — '{entry.title}' at {_to_local(entry.start).isoformat()} is back on the "
+        "calendar. Confirm that to the user in one short natural sentence."
+    )

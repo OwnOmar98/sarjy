@@ -52,6 +52,32 @@ _ISO_DATETIME = re.compile(
 )
 _ISO_TIME_ONLY = re.compile(r"(?<!\d)(?P<time>[0-9٠-٩]{1,2}:[0-9٠-٩]{2})(?::[0-9٠-٩]{2})?(?!\d)")
 
+# Currency (docs/PRD.md §2 named it as a risk category). No feature in this
+# app produces currency text today, so unlike the ISO patterns above this
+# was never confirmed broken by a live round-trip — it is written to the
+# same shape as the fix that *was* proven (strip the delimiter structure,
+# use natural word order), on the reasoning that a symbol-prefixed amount
+# is the same kind of non-word token as a colon-delimited time.
+#
+# Handles both writing orders — "SAR 250" / "250 SAR" / "$250" — because
+# an LLM asked for a price in Arabic text may produce either.
+_CURRENCY_WORDS = {
+    "SAR": "ريال",
+    "﷼": "ريال",
+    "USD": "دولار",
+    "$": "دولار",
+    "AED": "درهم",
+    "EUR": "يورو",
+    "€": "يورو",
+}
+_CURRENCY_ALTERNATION = "|".join(
+    re.escape(code) for code in sorted(_CURRENCY_WORDS, key=len, reverse=True)
+)
+_CURRENCY = re.compile(
+    rf"(?<![\w])(?:(?P<pre>{_CURRENCY_ALTERNATION})\s*(?P<amount_after>[0-9٠-٩]+(?:[.,][0-9٠-٩]+)?)"
+    rf"|(?P<amount_before>[0-9٠-٩]+(?:[.,][0-9٠-٩]+)?)\s*(?P<post>{_CURRENCY_ALTERNATION}))(?![\w])"
+)
+
 # Longest realistic match ("2026-08-20T14:30:00+03:00") plus margin —
 # how much text a streaming caller should hold back so a pattern split
 # across chunk boundaries doesn't get missed (see main.py's tts_node).
@@ -88,6 +114,15 @@ def _speak_time(time_str: str) -> str:
     return f"{hour_12} {marker}"
 
 
+def _speak_currency(amount: str, code: str) -> str:
+    # Decimal separator spelled out rather than left as "." or "," — the
+    # same delimiter-structure problem the ISO patterns above exist for.
+    digits = amount.translate(_ARABIC_DIGITS)
+    whole, _, frac = re.match(r"(\d+)(?:([.,])(\d+))?$", digits).groups("")
+    spoken = f"{whole} فاصلة {frac}" if frac else whole
+    return f"{spoken} {_CURRENCY_WORDS[code]}"
+
+
 def normalize_for_speech(text: str) -> str:
     def _replace_datetime(m: re.Match) -> str:
         spoken = _speak_date(m.group("date"))
@@ -95,5 +130,11 @@ def normalize_for_speech(text: str) -> str:
             spoken += " الساعة " + _speak_time(m.group("time"))
         return spoken
 
+    def _replace_currency(m: re.Match) -> str:
+        if m.group("pre"):
+            return _speak_currency(m.group("amount_after"), m.group("pre"))
+        return _speak_currency(m.group("amount_before"), m.group("post"))
+
     text = _ISO_DATETIME.sub(_replace_datetime, text)
-    return _ISO_TIME_ONLY.sub(lambda m: _speak_time(m.group("time")), text)
+    text = _ISO_TIME_ONLY.sub(lambda m: _speak_time(m.group("time")), text)
+    return _CURRENCY.sub(_replace_currency, text)
