@@ -36,11 +36,12 @@ from latency import LatencyTracker
 from llm_adapter import build_llm
 from stt_adapter import build_stt
 from tools import (
-    book_calendar_event,
-    cancel_calendar_event,
     check_calendar_availability,
+    confirm_pending_action,
     get_prayer_time,
     list_calendar_events,
+    propose_booking,
+    propose_cancellation,
 )
 from tts_adapter import build_tts
 
@@ -258,60 +259,34 @@ class SarjyAgent(Agent):
                 "spoken sentence in whichever language you're replying "
                 'in ("الساعة أربعة وثلاث دقائق فجرًا", not "04:03"; '
                 '"today" or the actual date spoken naturally, not '
-                '"2026-08-13"). Booking always follows these exact steps, '
-                "in order, no exceptions: "
-                "STEP 1 — call check_calendar_availability first, always, "
-                "no matter how explicit the request was; it checks for a "
-                "real conflict, not just whether you understood "
-                "correctly, and skipping it risks a silent double-booking. "
-                "The tools only take a duration in minutes, not an end "
-                'time — if the user gave both a start and an end ("between '
-                '1 and 2", "from 3 to 4:30"), compute the duration '
-                "yourself for this step, don't ask for it again; only ask "
-                "first if a duration truly can't be worked out from what "
-                "they said. "
-                "STEP 2 — once availability comes back free, check ONE "
-                "condition: did the user say a single exact clock time "
-                "and a single exact duration as literal numbers, both in "
-                'their own words ("book a 1-hour meeting at 12pm" '
-                'qualifies; "between 1 and 2" or "after Maghrib" do '
-                "not, even though you now know the exact time — you "
-                "still had to compute or look it up). "
-                "STEP 3a — condition TRUE: call book_calendar_event "
-                "immediately, no extra turn, and say what you booked in "
-                "the same reply. "
-                "STEP 3b — condition FALSE: do NOT call "
-                "book_calendar_event yet. State the resolved time and "
-                "duration back in one short sentence and wait for the "
-                "user's actual next turn — a duration you computed, a "
-                "time from prayer-time math, a rounded time, or an "
-                "assumed/default duration the user never stated are all "
-                "things YOU resolved, and STT can mishear, so this needs "
-                "a real confirmation before booking. This is a voice "
-                "conversation with no keyboard: never ask the user to "
-                "type anything, and never require one exact word — any "
-                'clear spoken yes ("confirm", "yes", "go ahead", "book '
-                'it", "نعم", "احجزها") counts; a clear no or a change of '
-                "details means don't book yet. "
-                "Canceling an event follows the same discipline as "
-                "booking — it's just as irreversible. First identify the "
-                "exact event: if you don't already know its exact start "
-                "time, call list_calendar_events (or "
-                "check_calendar_availability) first — never guess a time "
-                "just to cancel something. Then state which specific "
-                "event you're about to cancel in one short sentence and "
-                "wait for the user's actual next turn before calling "
-                "cancel_calendar_event — same rules as booking "
-                "confirmation apply (any clear spoken yes/no counts, "
-                "never require an exact word or typing). Never cancel in "
-                "the same turn the request was first made."
+                '"2026-08-13"). Booking and cancelling both go through '
+                "propose_booking/propose_cancellation first, then "
+                "confirm_pending_action — the actual write only happens "
+                "on that second call, so never treat a proposal as done "
+                "until you've confirmed it. propose_booking takes a "
+                "duration in minutes, not an end time — if the user gave "
+                'both ("between 1 and 2"), compute the duration yourself, '
+                "don't ask for it again; only ask first if it truly can't "
+                "be worked out. For cancelling, get the exact event time "
+                "first (list_calendar_events or check_calendar_availability "
+                "if you don't already know it) before proposing. After "
+                "either propose call, relay what it describes to the user "
+                "in one short sentence and wait for their actual next turn "
+                "— this is voice with no keyboard, so any clear spoken yes "
+                '("confirm", "yes", "go ahead", "نعم", "احجزها") counts, '
+                "never require an exact word or typing; a clear no or "
+                "changed details means propose again instead of "
+                "confirming. Never call confirm_pending_action without a "
+                "live proposal from this same conversation, and never in "
+                "the same turn the proposal was first made."
             ),
             tools=[
                 get_prayer_time,
                 check_calendar_availability,
                 list_calendar_events,
-                book_calendar_event,
-                cancel_calendar_event,
+                propose_booking,
+                propose_cancellation,
+                confirm_pending_action,
             ],
         )
 
