@@ -31,6 +31,7 @@ from livekit.rtc import AudioFrame
 
 import memory
 import tts_cache
+from arabic_normalize import MAX_PATTERN_LEN, normalize_for_speech
 from language_detect import describe_for_llm, detect_code_switch
 from latency import LatencyTracker
 from llm_adapter import build_llm
@@ -140,6 +141,21 @@ async def _strip_leaked_tool_syntax(
         yield llm.ChatChunk(id=last_id, delta=llm.ChoiceDelta(role="assistant", content=pending))
 
 
+async def _normalize_arabic_tts_stream(text: AsyncIterable[str]) -> AsyncIterator[str]:
+    # Same hold-back-a-tail technique as _strip_leaked_tool_syntax above,
+    # here so a raw ISO date/time split across two streamed chunks still
+    # gets caught rather than slipping through unmatched.
+    pending = ""
+    async for chunk in text:
+        pending += chunk
+        safe_len = max(0, len(pending) - MAX_PATTERN_LEN)
+        if safe_len:
+            yield normalize_for_speech(pending[:safe_len])
+            pending = pending[safe_len:]
+    if pending:
+        yield normalize_for_speech(pending)
+
+
 _ARABIC_SCRIPT = re.compile(r"[؀-ۿݐ-ݿࢠ-ࣿﭐ-﷿ﹰ-﻿]")
 
 
@@ -183,13 +199,19 @@ async def _cached_tts_node(
     if first not in _CACHEABLE_PHRASES:
         # The overwhelming common case (an LLM-generated reply, never a
         # cache candidate) — one unavoidable peek at the first chunk to
-        # rule it out, then straight through with no buffering added.
+        # rule it out, then straight through with no buffering added
+        # beyond _normalize_arabic_tts_stream's own small hold-back (the
+        # only path a raw ISO date/time could actually appear on; the
+        # two cacheable phrases below are fixed strings that never
+        # contain one, so they skip normalization rather than needing it).
         async def _passthrough() -> AsyncIterator[str]:
             yield first
             async for chunk in text_iter:
                 yield chunk
 
-        async for frame in Agent.default.tts_node(agent, _passthrough(), model_settings):
+        async for frame in Agent.default.tts_node(
+            agent, _normalize_arabic_tts_stream(_passthrough()), model_settings
+        ):
             yield frame
         return
 
