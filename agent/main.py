@@ -31,11 +31,13 @@ from livekit.rtc import AudioFrame
 
 import memory
 import tts_cache
+from language_detect import describe_for_llm, detect_code_switch
 from latency import LatencyTracker
 from llm_adapter import build_llm
 from stt_adapter import build_stt
 from tools import (
     book_calendar_event,
+    cancel_calendar_event,
     check_calendar_availability,
     get_prayer_time,
     list_calendar_events,
@@ -228,11 +230,16 @@ class SarjyAgent(Agent):
         super().__init__(
             instructions=(
                 "You are Sarjy, a helpful bilingual (Arabic/English) voice "
-                "assistant. Reply in whichever language the user's last "
-                "message actually used — pure Arabic in, pure Arabic back; "
-                "pure English in, pure English back. If their message "
-                "itself mixed languages mid-sentence, mirroring that mix "
-                "is fine. Never say the same sentence twice in two "
+                "assistant. Judge the language of the user's last message "
+                "as a whole and reply in one of three modes: mostly "
+                "Arabic — reply in Arabic; mostly English — reply in "
+                "English; meaningfully mixed, real code-switching rather "
+                "than a single borrowed word — reply naturally in that "
+                "same kind of mixed Arabic/English a bilingual speaker "
+                "would actually use. Don't mirror language word-by-word "
+                "or force every term to match what they said; the goal "
+                "is natural bilingual conversation, not literal "
+                "mirroring. Never say the same sentence twice in two "
                 "languages as a translation — that is not what matching "
                 "the user's language means, and it's not something a "
                 "real bilingual speaker would do. Keep responses short — "
@@ -285,13 +292,26 @@ class SarjyAgent(Agent):
                 "type anything, and never require one exact word — any "
                 'clear spoken yes ("confirm", "yes", "go ahead", "book '
                 'it", "نعم", "احجزها") counts; a clear no or a change of '
-                "details means don't book yet."
+                "details means don't book yet. "
+                "Canceling an event follows the same discipline as "
+                "booking — it's just as irreversible. First identify the "
+                "exact event: if you don't already know its exact start "
+                "time, call list_calendar_events (or "
+                "check_calendar_availability) first — never guess a time "
+                "just to cancel something. Then state which specific "
+                "event you're about to cancel in one short sentence and "
+                "wait for the user's actual next turn before calling "
+                "cancel_calendar_event — same rules as booking "
+                "confirmation apply (any clear spoken yes/no counts, "
+                "never require an exact word or typing). Never cancel in "
+                "the same turn the request was first made."
             ),
             tools=[
                 get_prayer_time,
                 check_calendar_availability,
                 list_calendar_events,
                 book_calendar_event,
+                cancel_calendar_event,
             ],
         )
 
@@ -315,6 +335,16 @@ class SarjyAgent(Agent):
         text = new_message.text_content
         if not text:
             return
+
+        # language_detect.py works off the plain transcript text, not
+        # anything STT provides — Groq never reliably reports even a
+        # single per-utterance language field (confirmed live: ev.language
+        # is empty on every real turn). Only injected when genuinely
+        # mixed; a single-language turn is already covered by this
+        # class's own three-mode language-response instructions.
+        if lang_context := describe_for_llm(detect_code_switch(text)):
+            turn_ctx.add_message(role="system", content=lang_context)
+
         start = time.monotonic()
         facts = await memory.retrieve(self.session.userdata, text)
         _publish_stage(self._latency, "memory", time.monotonic() - start)
@@ -440,17 +470,29 @@ async def entrypoint(ctx: JobContext) -> None:
         ),
     )
 
-    greeting_instructions = "Greet the user briefly in English, mention you also speak Arabic."
     # on_user_turn_completed (above) only fires from the second turn
     # onward — the greeting is generated before any user turn exists, so
     # a returning user needs this same retrieve() call run once up front.
-    known_facts = await memory.retrieve(user_id, "the user's name")
+    # Broad query ("facts about the user", not just "the user's name") so
+    # a returning user who never stated their name still counts as known.
+    known_facts = await memory.retrieve(user_id, "facts about the user")
     if known_facts:
-        greeting_instructions += (
-            " You already know this about them from past conversations: "
+        # extract_facts() (memory.py) normalizes each fact into whichever
+        # language reads best — reused here as a free, already-available
+        # signal for which language this user tends to speak, rather than
+        # tracking a separate explicit preference.
+        preferred_language = (
+            "Arabic" if _detect_language(" ".join(known_facts)) == "ar" else "English"
+        )
+        greeting_instructions = (
+            f"Greet this returning user briefly in {preferred_language} — they "
+            "already know you're bilingual, so don't re-explain that. You "
+            "already know this about them from past conversations: "
             + "; ".join(known_facts)
             + ". If their name is among these, greet them by name instead of generically."
         )
+    else:
+        greeting_instructions = "Greet the user briefly in English, mention you also speak Arabic."
 
     await session.generate_reply(instructions=greeting_instructions)
 
