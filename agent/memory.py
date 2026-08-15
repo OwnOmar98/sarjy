@@ -135,6 +135,18 @@ async def store(user_id: str, facts: list[str]) -> None:
     if not facts:
         return
     embeddings, provider = await embed_documents(facts)
+    if len(embeddings) != len(facts):
+        # zip() below would otherwise silently truncate to the shorter
+        # list — confirmed live: gemini-embedding-2 returned 1 embedding
+        # for 4 facts with no error, and only the first fact got saved.
+        # Fixed at the embedding_adapter.py source, but this stays as a
+        # hard stop against the same silent-data-loss shape recurring
+        # from a different provider quirk in the future.
+        raise RuntimeError(
+            f"embed_documents returned {len(embeddings)} embeddings for "
+            f"{len(facts)} facts (provider={provider}) — refusing to "
+            "silently save a truncated subset."
+        )
     pool = await get_pool()
     async with pool.acquire() as conn, conn.transaction():
         # facts.user_id FK's users.id — lazily create the row rather than

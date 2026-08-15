@@ -31,6 +31,7 @@ semantics, which is worse than a crash, so the two get separate embed
 functions rather than one parameterized over both.
 """
 
+import asyncio
 import logging
 import os
 
@@ -75,12 +76,25 @@ def _v2_prefix(texts: list[str], kind: str) -> list[str]:
 
 
 async def _gemini_embed_v2(texts: list[str], kind: str) -> list[list[float]]:
-    resp = await _get_genai_client().aio.models.embed_content(
-        model=_GEMINI_PRIMARY_MODEL,
-        contents=_v2_prefix(texts, kind),
-        config=types.EmbedContentConfig(output_dimensionality=_DIMENSIONS),
-    )
-    return [e.values for e in resp.embeddings]
+    # gemini-embedding-2 doesn't actually batch: passing N>1 texts in
+    # `contents` still returns exactly 1 embedding, silently — confirmed
+    # live, no error, no warning. store()'s zip(facts, embeddings) then
+    # truncates to the shorter list, so only the first of several facts
+    # in one turn ever got saved. One call per text sidesteps it; -001
+    # (the fallback) batches correctly on the same input, so this is a
+    # -2-specific gap, not a general SDK limitation.
+    client = _get_genai_client()
+    prefixed = _v2_prefix(texts, kind)
+
+    async def _one(text: str) -> list[float]:
+        resp = await client.aio.models.embed_content(
+            model=_GEMINI_PRIMARY_MODEL,
+            contents=[text],
+            config=types.EmbedContentConfig(output_dimensionality=_DIMENSIONS),
+        )
+        return resp.embeddings[0].values
+
+    return list(await asyncio.gather(*(_one(t) for t in prefixed)))
 
 
 async def _gemini_embed_v1(texts: list[str], kind: str) -> list[list[float]]:
