@@ -96,6 +96,25 @@ def _speak_date(date_str: str) -> str:
     return f"{day} {_ARABIC_MONTHS.get(month, str(month))} {year}"
 
 
+_PERIOD_MARKER_WORDS = tuple(marker for _, _, marker in _PERIOD_MARKERS)
+
+
+def _speak_bare_time(m: re.Match) -> str:
+    # A raw "H:MM" the LLM left un-converted, immediately followed by a
+    # period marker it already wrote correctly, is a real live pattern —
+    # e.g. "الساعة 3:00 مساءً". _speak_time below always reads bare
+    # digits as 24-hour (it has no way to know AM/PM otherwise), so
+    # blindly normalizing here appended a second, contradicting marker
+    # in front of the correct one: "3 فجرًا مساءً". When a marker already
+    # follows, trust it and only convert the digits.
+    tail = m.string[m.end() :].lstrip()
+    if tail.startswith(_PERIOD_MARKER_WORDS):
+        hour, minute = (int(p) for p in m.group("time").translate(_ARABIC_DIGITS).split(":")[:2])
+        hour_12 = hour % 12 or 12
+        return f"{hour_12} و{minute} دقيقة" if minute else str(hour_12)
+    return _speak_time(m.group("time"))
+
+
 def _speak_time(time_str: str) -> str:
     # No leading "الساعة" here deliberately — text feeding this (e.g.
     # "الموعد الساعة 14:00") almost always already has that word right
@@ -136,5 +155,5 @@ def normalize_for_speech(text: str) -> str:
         return _speak_currency(m.group("amount_before"), m.group("post"))
 
     text = _ISO_DATETIME.sub(_replace_datetime, text)
-    text = _ISO_TIME_ONLY.sub(lambda m: _speak_time(m.group("time")), text)
+    text = _ISO_TIME_ONLY.sub(_speak_bare_time, text)
     return _CURRENCY.sub(_replace_currency, text)
