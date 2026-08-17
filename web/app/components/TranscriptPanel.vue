@@ -40,7 +40,7 @@ watch(
 </script>
 
 <template>
-  <div ref="listEl" class="transcript">
+  <div ref="listEl" class="transcript thin-scrollbar">
     <p v-if="!entries.length" class="transcript__empty">
       {{ t("transcriptEmpty") }}
     </p>
@@ -84,26 +84,6 @@ watch(
   overflow-y: auto;
   border: 1px solid rgba(43, 36, 28, 0.16);
   text-align: start;
-
-  /* Browser default surfaces carry the design too — an unthemed OS
-     scrollbar on the one internally-scrolling panel breaks the
-     instrumentation feel faster than anything else on the page. */
-  scrollbar-width: thin;
-  scrollbar-color: rgba(43, 36, 28, 0.25) transparent;
-}
-
-.transcript::-webkit-scrollbar {
-  width: 8px;
-}
-
-.transcript::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.transcript::-webkit-scrollbar-thumb {
-  background-color: rgba(43, 36, 28, 0.25);
-  border: 2px solid rgb(var(--v-theme-surface));
-  border-radius: 0;
 }
 
 .transcript__empty {

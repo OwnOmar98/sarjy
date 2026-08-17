@@ -21,7 +21,7 @@ const { t } = useI18n();
       TranscriptPanel's — near-identical text on two adjacent panels
       reads as one frozen panel instead of two unrelated ones. -->
     <p class="lattice-cells__heading">{{ t("latencyHeading") }}</p>
-    <div class="lattice-cells">
+    <div class="lattice-cells thin-scrollbar">
       <p v-if="!stages.length" class="text-body-2 lattice-cells__empty pa-4">
         {{ t("latencyEmpty") }}
       </p>
@@ -37,24 +37,26 @@ const { t } = useI18n();
       <p class="lattice-cells__heading mt-6">
         {{ t("latencyPercentilesHeading") }}
       </p>
-      <table class="lattice-table">
-        <thead>
-          <tr>
-            <th class="text-start">{{ t("latencyStageColumn") }}</th>
-            <th class="text-end">p50</th>
-            <th class="text-end">p95</th>
-            <th class="text-end">n</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr v-for="p in percentiles" :key="p.stage">
-            <td class="lattice-table__stage">{{ p.stage }}</td>
-            <td class="text-end lattice-table__ms">{{ p.p50 }}ms</td>
-            <td class="text-end lattice-table__ms">{{ p.p95 }}ms</td>
-            <td class="text-end">{{ p.n }}</td>
-          </tr>
-        </tbody>
-      </table>
+      <div class="lattice-table-scroll thin-scrollbar">
+        <table class="lattice-table">
+          <thead>
+            <tr>
+              <th class="text-start">{{ t("latencyStageColumn") }}</th>
+              <th class="text-end">p50</th>
+              <th class="text-end">p95</th>
+              <th class="text-end">n</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="p in percentiles" :key="p.stage">
+              <td class="lattice-table__stage">{{ p.stage }}</td>
+              <td class="text-end lattice-table__ms">{{ p.p50 }}ms</td>
+              <td class="text-end lattice-table__ms">{{ p.p95 }}ms</td>
+              <td class="text-end">{{ p.n }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
     </template>
   </div>
 </template>
@@ -76,7 +78,14 @@ const { t } = useI18n();
   color: var(--ink-muted);
 }
 
+/* Bounded and internally scrollable, same treatment as every other
+   content panel on this page (the transcripts) — the actual stage/
+   percentile counts are small and fixed in practice, so this is
+   consistency more than a real necessity, but it keeps the page's total
+   height predictable rather than open-ended if that ever changes. */
 .lattice-cells {
+  max-height: 14rem;
+  overflow-y: auto;
   border: 1px solid rgba(43, 36, 28, 0.16);
 }
 
@@ -104,6 +113,11 @@ const { t } = useI18n();
   font-family: "IBM Plex Mono", ui-monospace, monospace;
   font-size: 1.1rem;
   font-weight: 600;
+}
+
+.lattice-table-scroll {
+  max-height: 14rem;
+  overflow-y: auto;
 }
 
 .lattice-table {

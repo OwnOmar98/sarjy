@@ -7,6 +7,7 @@ loop, deployed. Stubbed pieces are TODO-tagged per docs/PRD.md.
 """
 
 import asyncio
+import json
 import logging
 import re
 import time
@@ -32,9 +33,11 @@ from livekit.agents import (
 from livekit.plugins import noise_cancellation, silero
 from livekit.rtc import AudioFrame
 
+import conversations
 import memory
 import tts_cache
 from arabic_normalize import MAX_PATTERN_LEN, normalize_for_speech
+from db import ensure_user
 from language_detect import describe_for_llm, detect_code_switch
 from latency import LatencyTracker
 from llm_adapter import build_llm
@@ -170,19 +173,72 @@ async def _strip_leaked_tool_syntax(
         yield llm.ChatChunk(id=last_id, delta=llm.ChoiceDelta(role="assistant", content=pending))
 
 
+# A reply-wide sticky "has this shown Arabic yet" flag was the first fix
+# here and was itself wrong: a genuinely mixed reply that opens in Arabic
+# and later switches to a whole separate English sentence would still
+# Arabic-ize a bare time in that sentence, purely because the reply had
+# touched Arabic earlier in an unrelated clause — confirmed live (and
+# raised again testing a mixed reply: an English clause right after an
+# Arabic one still got Arabic-ized, since a flat character-count lookback
+# alone still reached back across the sentence break into the Arabic
+# clause). What should decide a given number is the language of its own
+# sentence, not the reply as a whole and not just "N characters back"
+# blind to what's in them — so this resets at the most recent sentence
+# boundary (./!/?/؟) in the recently-emitted text before checking it for
+# Arabic script, in addition to capping its raw length as a backstop for
+# a pathologically long, unpunctuated sentence.
+_ARABIC_CONTEXT_WINDOW = MAX_PATTERN_LEN * 2
+_SENTENCE_END = re.compile(r"[.!?؟]")
+
+
+def _carry_forward(combined: str) -> str:
+    # What the *next* window inherits as context — reset at the most
+    # recent sentence boundary (a later, separate sentence shouldn't
+    # remember an earlier one's language), length-capped as a backstop for
+    # a pathologically long, unpunctuated sentence. Deliberately NOT used
+    # to judge the window that produced `combined` itself — a window whose
+    # own trailing character happens to be that sentence's period (the
+    # common case: the period arrives in the same flush as what precedes
+    # it) would otherwise have its own content chopped away by its own
+    # trailing punctuation right before being checked, discarding the very
+    # context it needed to judge itself correctly. That exact bug shipped
+    # first: "17:00." flushed as one piece, and the period at the end
+    # wiped out "...الساعة" right before the has-Arabic check ran on it.
+    boundaries = list(_SENTENCE_END.finditer(combined))
+    if boundaries:
+        combined = combined[boundaries[-1].end() :]
+    return combined[-_ARABIC_CONTEXT_WINDOW:]
+
+
 async def _normalize_arabic_tts_stream(text: AsyncIterable[str]) -> AsyncIterator[str]:
     # Same hold-back-a-tail technique as _strip_leaked_tool_syntax above,
     # here so a raw ISO date/time split across two streamed chunks still
     # gets caught rather than slipping through unmatched.
+    #
+    # normalize_for_speech only ever produces Arabic words — right for an
+    # Arabic reply's raw ISO date/time (its whole purpose, per
+    # arabic_normalize.py's docstring), wrong for an English one: an
+    # English reply mentioning "5:00" has no Arabic period-marker word
+    # for _speak_bare_time to recognize, so it fell through to a bare
+    # hour-based guess and produced "5 صباحًا" (an Arabic AM/PM marker)
+    # sitting inside an otherwise-English sentence — confirmed live. Only
+    # normalize a window whose own context (everything carried forward
+    # from earlier windows, since the last sentence boundary, plus the
+    # window itself) actually contains Arabic script — see _carry_forward.
     pending = ""
+    recent = ""
     async for chunk in text:
         pending += chunk
         safe_len = max(0, len(pending) - MAX_PATTERN_LEN)
         if safe_len:
-            yield normalize_for_speech(pending[:safe_len])
+            window = pending[:safe_len]
+            combined = recent + window
+            yield normalize_for_speech(window) if _ARABIC_SCRIPT.search(combined) else window
+            recent = _carry_forward(combined)
             pending = pending[safe_len:]
     if pending:
-        yield normalize_for_speech(pending)
+        combined = recent + pending
+        yield normalize_for_speech(pending) if _ARABIC_SCRIPT.search(combined) else pending
 
 
 _ARABIC_SCRIPT = re.compile(r"[؀-ۿݐ-ݿࢠ-ࣿﭐ-﷿ﹰ-﻿]")
@@ -497,6 +553,14 @@ async def entrypoint(ctx: JobContext) -> None:
     participant = await ctx.wait_for_participant()
     user_id = _normalize_user_id(participant.identity)
 
+    # First thing done with this identity, before anything else in this
+    # function touches Postgres — every user_id-keyed table FK's this row,
+    # so nothing downstream needs its own lazy-create anymore.
+    try:
+        await ensure_user(user_id)
+    except Exception:
+        logger.exception("db: failed to ensure user row — memory/sessions may fail this turn")
+
     latency = LatencyTracker(room=ctx.room, session_id=ctx.room.name)
 
     # Retrieved before the session is built, not after start(), because it
@@ -509,6 +573,78 @@ async def entrypoint(ctx: JobContext) -> None:
     except Exception:
         logger.exception("memory: initial retrieve failed, starting without known facts")
         known_facts = []
+
+    # web/server/api/token.get.ts sets this participant attribute only when
+    # the user picked "continue" on a specific past conversation in the UI
+    # — absent on every fresh connection. resume_context scopes the lookup
+    # to user_id too, so a browser can't reopen another user's session
+    # just by guessing an id, and distinguishes "no such session" from "a
+    # real one with no summary yet" (a plain nullable return couldn't).
+    resume_summary = None
+    db_session_id: str | None = None
+    if resume_session_id := participant.attributes.get("resume_session_id"):
+        try:
+            found, resume_summary = await conversations.resume_context(resume_session_id, user_id)
+            if found:
+                # Reopens the same conversation — new messages append to
+                # this row, not a new one, which is what lets sending a
+                # message in a resumed conversation move it back to the
+                # top of the web UI's most-recently-active sort.
+                db_session_id = resume_session_id
+        except Exception:
+            logger.exception("conversations: failed to fetch resume context")
+
+    # New row per LiveKit session, not per user — this is the "one browsable
+    # conversation" unit web/server/api/sessions*.ts reads back. Covers
+    # both a genuinely fresh connection and a resume_session_id that
+    # turned out stale/foreign (resume_context found nothing for it above)
+    # — either way, falls back to a real session rather than silently
+    # going conversation-history-less for the rest of this call. Failure
+    # here shouldn't cost the whole conversation either, same reasoning as
+    # known_facts above; a session that fails to open just doesn't get
+    # persisted or summarized, everything else still works.
+    if db_session_id is None:
+        try:
+            db_session_id = await conversations.start_session(user_id)
+        except Exception:
+            logger.exception("conversations: failed to open a session row")
+
+    if db_session_id is not None:
+        # The web side has no other way to learn a brand-new conversation's
+        # id (it only ever sends resume_session_id, never receives one back)
+        # — without this, clicking Stop on a fresh conversation had nowhere
+        # sensible to navigate to, even though the row (and its messages)
+        # already existed. Also fires for a resumed conversation (redundant
+        # with what the web side already has via the route, but harmless)
+        # rather than special-casing which branch set db_session_id above.
+        # Fire-and-forget, not awaited — nothing below this point depends
+        # on it having landed (the frontend only needs it by the time
+        # someone clicks Stop, comfortably later), so there's no reason to
+        # hold up session.start()/the greeting on a data-channel round
+        # trip. Originally awaited here and confirmed live as one real
+        # contributor to "starting a conversation takes longer now."
+        async def _publish_session_id() -> None:
+            try:
+                await ctx.room.local_participant.publish_data(
+                    json.dumps({"sessionId": db_session_id}).encode("utf-8"),
+                    topic="session",
+                )
+            except Exception:
+                logger.exception("failed to publish session id to room")
+
+        _fire_and_forget(_publish_session_id())
+
+        # Runs on every shutdown path (Stop button, disconnect, crash) —
+        # add_shutdown_callback, not a bare fire-and-forget task, because
+        # this needs to survive past the point the job process starts
+        # tearing down, which a plain asyncio.create_task does not.
+        async def _close_session() -> None:
+            try:
+                await conversations.end_session(db_session_id)
+            except Exception:
+                logger.exception("conversations: failed to close/summarize session")
+
+        ctx.add_shutdown_callback(_close_session)
 
     # TODO(day 2): swap LLM/TTS per request by language (docs/PRD.md §3-4).
     session = AgentSession[str](
@@ -689,10 +825,14 @@ async def entrypoint(ctx: JobContext) -> None:
             text = ev.item.text_content
             if text:
                 _fire_and_forget(_remember(user_id, text))
+                if db_session_id is not None:
+                    _fire_and_forget(conversations.add_message(db_session_id, "user", text))
         elif ev.item.role == "assistant":
             _publish_stage(latency, "llm_first_token", ev.item.metrics.get("llm_node_ttft"))
             _publish_stage(latency, "tts_first_byte", ev.item.metrics.get("tts_node_ttfb"))
             _publish_stage(latency, "total", ev.item.metrics.get("e2e_latency"))
+            if db_session_id is not None and (text := ev.item.text_content):
+                _fire_and_forget(conversations.add_message(db_session_id, "assistant", text))
 
     await session.start(
         agent=SarjyAgent(latency=latency),
@@ -735,6 +875,18 @@ async def entrypoint(ctx: JobContext) -> None:
         )
     else:
         greeting_instructions = "Greet the user briefly in English, mention you also speak Arabic."
+
+    if resume_summary:
+        # Additive, not a replacement for the known_facts greeting above —
+        # facts are about the user in general, this is specifically "you
+        # picked up a particular past conversation," which needs its own
+        # acknowledgment (e.g. "picking up where we left off...").
+        greeting_instructions += (
+            " The user just chose to continue a specific earlier conversation. "
+            f"Here's what it was about: {resume_summary} Acknowledge picking it "
+            "back up (briefly — don't recite the summary verbatim) before asking "
+            "how you can help."
+        )
 
     await session.generate_reply(instructions=greeting_instructions)
 

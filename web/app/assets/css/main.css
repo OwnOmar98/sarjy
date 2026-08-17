@@ -28,6 +28,18 @@ body {
   font-family: "IBM Plex Sans", "IBM Plex Sans Arabic", sans-serif !important;
 }
 
+/* Neither this file nor Vuetify's own styles reset the browser default
+   body margin (8px, universal across browsers) — with .app-shell
+   (SarjyApp.vue) capped at exactly 100dvh, that leftover margin was
+   still enough extra height to make the whole page taller than the
+   viewport, so the browser opened its own outer scrollbar alongside
+   each panel's already-correct internal one — confirmed live. */
+html,
+body {
+  margin: 0;
+  padding: 0;
+}
+
 /* Arabic-first for pure-Arabic runs — mixed-script fallback above
    already covers per-glyph rendering; this just fixes line-height. */
 :lang(ar) {
@@ -53,4 +65,34 @@ body {
   mask-repeat: repeat;
   -webkit-mask-size: 48px 48px;
   mask-size: 48px 48px;
+}
+
+/* Browser default surfaces carry the design too — an unthemed OS
+   scrollbar on an internally-scrolling panel breaks the instrumentation
+   feel faster than anything else on the page. Themed from the app's own
+   walnut-ink token, not a generic gray, same discipline every other
+   drawn control here follows. One shared class rather than duplicating
+   this per component (TranscriptPanel.vue originally had its own copy;
+   SelectedConversationTranscript.vue had only half of it). */
+.thin-scrollbar {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(43, 36, 28, 0.25) transparent;
+}
+
+.thin-scrollbar::-webkit-scrollbar {
+  width: 5px;
+  height: 5px;
+}
+
+.thin-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.thin-scrollbar::-webkit-scrollbar-thumb {
+  background-color: rgba(43, 36, 28, 0.25);
+  border-radius: 0;
+}
+
+.thin-scrollbar::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(43, 36, 28, 0.4);
 }

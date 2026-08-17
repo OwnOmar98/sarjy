@@ -27,5 +27,12 @@ export default {
   latencyEmpty: "No timing data yet.",
   latencyPercentilesHeading: "Session p50 / p95",
   latencyStageColumn: "Stage",
+  pastConversations: "Past conversations",
+  pastConversationsEmpty: "Your conversations will show up here.",
+  pastConversationsNoSummary: "(no summary — conversation was too short)",
+  newConversation: "New conversation",
+  openMenu: "Open menu",
+  conversationNotFound: "Conversation not found.",
+  scrollToBottom: "Scroll to most recent",
   $vuetify,
 };
