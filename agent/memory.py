@@ -39,7 +39,10 @@ from embedding_adapter import embed_documents, embed_query
 
 logger = logging.getLogger("sarjy-agent.memory")
 
-_GROQ_EXTRACT_MODEL = "llama-3.1-8b-instant"  # cheap pass, per PRD §5
+# llama-3.1-8b-instant was removed from Groq's catalog entirely (confirmed
+# live via /openai/v1/models — a plain 404 model_not_found, not a rate
+# limit); gpt-oss-20b is the current cheap/fast model on Groq.
+_GROQ_EXTRACT_MODEL = "openai/gpt-oss-20b"  # cheap pass, per PRD §5
 _OPENAI_EXTRACT_MODEL = "gpt-5.4-mini"  # same fallback tier as llm_adapter.py
 _CACHE_TTL_S = 60
 

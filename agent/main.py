@@ -76,13 +76,15 @@ def _fire_and_forget(coro) -> None:
     task.add_done_callback(_background_tasks.discard)
 
 
-# Groq/llama-3.3-70b-versatile occasionally writes a tool call as literal
-# text (e.g. "<function=check_calendar_availability>{...}</function>")
-# instead of using the real tool-calling mechanism — it gets spoken and
-# shown to the user as garbage, and nothing actually gets called. Real
-# tool calls live in ChatChunk.delta.tool_calls, a separate field from
-# .content, so this only ever touches malformed text that leaked into
-# content — it can't affect a correctly-formed call.
+# Some models occasionally write a tool call as literal text (e.g.
+# "<function=check_calendar_availability>{...}</function>", originally
+# seen from Groq's now-removed llama-3.3-70b-versatile — see
+# llm_adapter.py) instead of using the real tool-calling mechanism — it
+# gets spoken and shown to the user as garbage, and nothing actually gets
+# called. Real tool calls live in ChatChunk.delta.tool_calls, a separate
+# field from .content, so this only ever touches malformed text that
+# leaked into content — it can't affect a correctly-formed call. Kept as
+# a defensive net regardless of which model is currently active.
 _LEAK_MARKER = "<function="
 
 # Graceful degradation (docs/PRD.md §5: "silence is the failure mode").

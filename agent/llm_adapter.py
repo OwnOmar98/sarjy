@@ -20,7 +20,14 @@ from livekit.plugins import openai as openai_plugin
 
 
 def _groq_llm() -> llm_base.LLM:
-    return groq.LLM(model="llama-3.3-70b-versatile")
+    # llama-3.3-70b-versatile was removed from Groq's catalog entirely —
+    # confirmed live via /openai/v1/models (a plain 404 model_not_found,
+    # not the rate-limit this file's own module docstring was written
+    # against). gpt-oss-120b is the current large general-purpose model
+    # on Groq; verified directly against the API to still support real
+    # tool_calls (not text-leaked JSON) and Arabic replies before
+    # switching to it.
+    return groq.LLM(model="openai/gpt-oss-120b")
 
 
 def _openai_llm() -> llm_base.LLM:
