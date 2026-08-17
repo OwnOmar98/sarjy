@@ -61,6 +61,15 @@ export function useSarjyRoom() {
   const connected = ref(false);
   const connecting = ref(false);
   const connectError = ref<ConnectError | null>(null);
+  // The web side only ever sends resume_session_id (an existing
+  // conversation) — a brand-new one is opened server-side (agent/main.py's
+  // conversations.start_session()) with no other way for this side to
+  // learn its id, so there was nowhere sensible to send someone once they
+  // clicked Stop on a fresh conversation. main.py publishes it over this
+  // "session" data topic the moment it knows it (both branches: a fresh
+  // row or a resumed one), same mechanism latency.py already uses for its
+  // own topic.
+  const sessionId = ref<string | null>(null);
   const transcript = ref<TranscriptEntry[]>([]);
   const latencyStages = ref<LatencyStage[]>([]);
   // Every stage value seen this session, keyed by stage name — unlike
@@ -100,7 +109,14 @@ export function useSarjyRoom() {
   // slowToStart surfaces a way out instead of a silent, stuck spinner.
   const ready = computed(() => connected.value && agentGreeted.value);
   const slowToStart = ref(false);
-  const READY_TIMEOUT_MS = 8000;
+  // Was 8000 — bumped after "starting takes longer now" reports. Found
+  // and fixed one real contributor (agent/main.py was awaiting a
+  // room.publish_data() round trip before session.start() even began,
+  // now fire-and-forget), but normal variance in agent join + VAD/STT/
+  // LLM/TTS provider warmup can still comfortably exceed 8s without
+  // anything actually being broken — this gives that real headroom
+  // rather than flashing the escape hatch on ordinary slow starts.
+  const READY_TIMEOUT_MS = 12000;
   let readyTimeoutId: ReturnType<typeof setTimeout> | null = null;
 
   function clearReadyTimeout() {
@@ -204,12 +220,13 @@ export function useSarjyRoom() {
     micLevel.value = 0;
   }
 
-  async function connect() {
+  async function connect(resumeSessionId?: string) {
     // Guards a double-click during the async window below from firing a
     // second concurrent token fetch + room.connect() on the same Room.
     if (connecting.value || connected.value) return;
     connecting.value = true;
     connectError.value = null;
+    sessionId.value = null;
     transcript.value = [];
     latencyStages.value = [];
     latencyHistory.value = {};
@@ -223,7 +240,7 @@ export function useSarjyRoom() {
     try {
       const { token, url } = await $fetch<{ token: string; url: string }>(
         "/api/token",
-        { query: { identity: getOrCreateIdentity() } },
+        { query: { identity: getOrCreateIdentity(), resumeSessionId } },
       );
       await room.connect(url, token);
       audioBlocked.value = !room.canPlaybackAudio;
@@ -306,6 +323,13 @@ export function useSarjyRoom() {
   // by a race between them.
   let currentLatencyTurn = -1;
   room.on(RoomEvent.DataReceived, (payload, _participant, _kind, topic) => {
+    if (topic === "session") {
+      const { sessionId: publishedId } = JSON.parse(
+        new TextDecoder().decode(payload),
+      ) as { sessionId: string };
+      sessionId.value = publishedId;
+      return;
+    }
     if (topic !== "latency") return;
     const { stage, ms, turn } = JSON.parse(
       new TextDecoder().decode(payload),
@@ -383,6 +407,7 @@ export function useSarjyRoom() {
     muted,
     toggleMute,
     micLevel,
+    sessionId,
     transcript,
     latencyStages,
     latencyPercentiles,
@@ -394,5 +419,6 @@ export function useSarjyRoom() {
     conversationState,
     audioBlocked,
     resumeAudio,
+    getOrCreateIdentity,
   };
 }

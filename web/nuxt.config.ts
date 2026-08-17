@@ -91,6 +91,7 @@ export default defineNuxtConfig({
   runtimeConfig: {
     livekitApiKey: "",
     livekitApiSecret: "",
+    databaseUrl: "",
     public: {
       livekitUrl: "",
     },

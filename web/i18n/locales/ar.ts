@@ -26,5 +26,12 @@ export default {
   latencyEmpty: "لا توجد بيانات توقيت بعد.",
   latencyPercentilesHeading: "زمن الجلسة (p50 / p95)",
   latencyStageColumn: "المرحلة",
+  pastConversations: "محادثات سابقة",
+  pastConversationsEmpty: "ستظهر محادثاتك هنا.",
+  pastConversationsNoSummary: "(لا يوجد ملخص — كانت المحادثة قصيرة جدًا)",
+  newConversation: "محادثة جديدة",
+  openMenu: "فتح القائمة",
+  conversationNotFound: "المحادثة غير موجودة.",
+  scrollToBottom: "الانتقال إلى الأحدث",
   $vuetify,
 };

@@ -12,9 +12,18 @@ export default defineEventHandler(async (event) => {
   // once per *new* room, not per participant join — a reused room name
   // across Stop/Start cycles would leave the second session with no agent.
   const room = `sarjy-${Date.now()}`;
+  // Set only when the user picked "continue" on a specific past
+  // conversation — agent/main.py reads this off the participant to fetch
+  // that conversation's summary. Not validated here (ownership is
+  // enforced where it's read: conversations.get_summary scopes by
+  // user_id too), this route only carries it through.
+  const resumeSessionId = getQuery(event).resumeSessionId?.toString();
 
   const at = new AccessToken(config.livekitApiKey, config.livekitApiSecret, {
     identity,
+    attributes: resumeSessionId
+      ? { resume_session_id: resumeSessionId }
+      : undefined,
   });
   at.addGrant({ room, roomJoin: true, canPublish: true, canSubscribe: true });
 
