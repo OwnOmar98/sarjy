@@ -453,6 +453,9 @@ function select(id: string) {
   .sidebar {
     position: fixed;
     inset-block: 0;
+    /* Resolves to the correct physical edge per direction on its own
+       (left in LTR, right in RTL) — no [dir="rtl"] override needed for
+       position itself, only for the transform/shadow below. */
     inset-inline-start: 0;
     z-index: 21;
     width: 18rem;
@@ -462,13 +465,16 @@ function select(id: string) {
     box-shadow: 4px 0 16px rgba(43, 36, 28, 0.18);
   }
 
+  /* transform/box-shadow are physical, not logical — flipped by hand. */
   [dir="rtl"] .sidebar {
-    inset-inline-start: auto;
-    inset-inline-end: 0;
     transform: translateX(100%);
+    box-shadow: -4px 0 16px rgba(43, 36, 28, 0.18);
   }
 
-  .sidebar--open {
+  /* .sidebar.sidebar--open, not plain .sidebar--open — needs to match
+     [dir="rtl"] .sidebar's specificity or the RTL closed-position rule
+     always wins and the drawer never opens in Arabic. */
+  .sidebar.sidebar--open {
     transform: translateX(0);
   }
 }
