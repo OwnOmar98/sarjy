@@ -18,7 +18,11 @@ from db import get_pool
 logger = logging.getLogger("sarjy-agent.conversations")
 
 _SUMMARY_MODEL_OPENAI = "gpt-5.4-mini"
-_SUMMARY_MODEL_GROQ = "llama-3.1-8b-instant"
+# llama-3.1-8b-instant was removed from Groq's catalog entirely (confirmed
+# live via /openai/v1/models — a plain 404 model_not_found); gpt-oss-20b
+# is the current cheap/fast model on Groq, same replacement memory.py's
+# own Groq fallback made.
+_SUMMARY_MODEL_GROQ = "openai/gpt-oss-20b"
 
 _SUMMARY_SYSTEM_PROMPT = (
     "Summarize this conversation between a user and Sarjy, a voice "
