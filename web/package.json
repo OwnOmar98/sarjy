@@ -8,9 +8,13 @@
     "generate": "nuxt generate",
     "preview": "nuxt preview",
     "postinstall": "nuxt prepare",
-    "typecheck": "nuxt typecheck"
+    "typecheck": "nuxt typecheck",
+    "build:cloudflare": "NITRO_PRESET=cloudflare_module nuxt build",
+    "preview:cloudflare": "npm run build:cloudflare && wrangler dev --config .output/server/wrangler.json",
+    "deploy:cloudflare": "npm run build:cloudflare && wrangler deploy --config .output/server/wrangler.json"
   },
   "dependencies": {
+    "@neondatabase/serverless": "^1.1.0",
     "@nuxt/fonts": "^0.14.0",
     "@nuxtjs/i18n": "^10.6.0",
     "livekit-client": "^2.21.0",
@@ -24,7 +28,8 @@
   },
   "devDependencies": {
     "typescript": "^6.0.3",
-    "vue-tsc": "^3.3.9"
+    "vue-tsc": "^3.3.9",
+    "wrangler": "^4.125.0"
   },
   "overrides": {
     "@intlify/vue-i18n-extensions": "^9.0.0"

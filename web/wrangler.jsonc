@@ -1,0 +1,12 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  // Just the identity + pin. Nitro's cloudflare_module preset (nuxt.config.ts
+  // reads NITRO_PRESET, see package.json's build:cloudflare) computes `main`,
+  // `assets`, and `compatibility_flags` itself at build time and merges this
+  // file's values into .output/server/wrangler.json — that generated file,
+  // not this one, is what `wrangler dev`/`deploy --config .output/server/wrangler.json`
+  // actually reads. Runtime secrets (LiveKit keys, DATABASE_URL) are
+  // deliberately not here — see web-deploy.yml's "Sync secrets" step.
+  "name": "sarjy-web",
+  "compatibility_date": "2025-07-15",
+}
