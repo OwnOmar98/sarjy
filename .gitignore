@@ -24,6 +24,9 @@ KMS/
 # build intermediates
 docs/PRD.html
 
+# scripts/dev-up.sh output
+logs/
+
 # editors / os
 .DS_Store
 .vscode/

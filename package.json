@@ -9,6 +9,8 @@
     "typecheck:web": "cd web && npm run typecheck",
     "lint:agent": "cd agent && .venv/bin/ruff check .",
     "docker:up": "cd db && docker compose up -d",
-    "docker:down": "cd db && docker compose down"
+    "docker:down": "cd db && docker compose down",
+    "dev:up": "bash scripts/dev-up.sh",
+    "dev:down": "bash scripts/dev-down.sh"
   }
 }
