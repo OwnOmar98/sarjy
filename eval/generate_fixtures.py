@@ -105,4 +105,7 @@ async def main() -> None:
         await synthesize(text, OUT_DIR / f"{name}.wav")
 
 
-asyncio.run(main())
+# Guarded so the fixture table above can be imported as reference text by
+# eval/stt_compare.py without re-synthesizing every clip on import.
+if __name__ == "__main__":
+    asyncio.run(main())

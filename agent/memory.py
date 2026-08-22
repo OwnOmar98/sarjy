@@ -24,6 +24,18 @@ Barge-in truncation (§5: never record a fact from text the user didn't
 actually hear) doesn't need separate handling here — extract_facts()
 is only ever called on user-role turns (main.py), and user speech is
 never truncated; only an interrupted *assistant* reply is.
+
+Corrections (a restated name, a changed preference) don't leave the old
+fact behind to keep getting recalled alongside the new one — store()
+deletes whatever extract_facts() flags as superseded in the same
+transaction as inserting the replacement, given the caller passes it
+the user's relevant existing facts first (main.py's _remember()).
+Without those, extract_facts() has nothing to compare a correction
+against and can only ever add. store() also clears retrieve()'s Redis
+cache for that user on any change — otherwise a query cached just
+before a correction can keep answering with the pre-correction fact
+for the rest of its TTL, even though Postgres already has the right
+answer.
 """
 
 import hashlib
@@ -70,9 +82,22 @@ _EXTRACT_SYSTEM_PROMPT = (
     "may be in Arabic, English, or a mix of both — normalize each fact "
     "into a single clear, natural sentence in whichever language reads "
     "best, rather than preserving code-switched phrasing verbatim; keep "
-    "names and other proper nouns as spoken. Reply with ONLY a JSON array "
-    'of short factual statements, e.g. ["favorite color is blue", "has a '
-    'meeting every Sunday"]. If nothing durable was said, reply with [].'
+    "names and other proper nouns as spoken. If the user spells a name or "
+    'word out letter by letter ("O-M-A-R", "دال-ألف-نون"), always store '
+    'the assembled, properly-capitalized word ("Omar"), never the literal '
+    "spelled-out letters — whether or not they're correcting an earlier "
+    "mishearing.\n\n"
+    "You will also be given the user's existing known facts (whichever "
+    "ones are already relevant to this message — not necessarily all of "
+    "them). If the new message states something that contradicts or "
+    "updates one of them — a new name, a changed preference, a corrected "
+    'spelling — put that OLD fact\'s exact original text in "remove", and '
+    'the new corrected fact in "add", so the outdated one doesn\'t keep '
+    "getting recalled alongside the correction. A fact with nothing to "
+    "add or remove is simply omitted from both. Reply with ONLY a JSON "
+    'object: {"add": [...], "remove": [...]}, e.g. {"add": ["favorite '
+    'color is green"], "remove": ["favorite color is blue"]}. Both may be '
+    "empty arrays."
 )
 
 
@@ -103,24 +128,39 @@ def _to_vector_literal(embedding: list[float]) -> str:
     return "[" + ",".join(map(str, embedding)) + "]"
 
 
-def _parse_facts_response(raw: str | None) -> list[str]:
-    raw = raw or "[]"
-    start, end = raw.find("["), raw.rfind("]")
+def _parse_facts_response(raw: str | None) -> tuple[list[str], list[str]]:
+    raw = raw or '{"add": [], "remove": []}'
+    start, end = raw.find("{"), raw.rfind("}")
     if start == -1 or end == -1:
-        logger.warning("extract_facts: no JSON array in response, discarding: %r", raw)
-        return []
+        logger.warning("extract_facts: no JSON object in response, discarding: %r", raw)
+        return [], []
     try:
-        facts = json.loads(raw[start : end + 1])
+        parsed = json.loads(raw[start : end + 1])
     except json.JSONDecodeError:
         logger.warning("extract_facts: malformed JSON, discarding: %r", raw)
-        return []
-    return [f.strip() for f in facts if isinstance(f, str) and f.strip()]
+        return [], []
+    add = [f.strip() for f in parsed.get("add", []) if isinstance(f, str) and f.strip()]
+    remove = [f.strip() for f in parsed.get("remove", []) if isinstance(f, str) and f.strip()]
+    return add, remove
 
 
-async def extract_facts(user_id: str, transcript: str) -> list[str]:
+async def extract_facts(
+    user_id: str, transcript: str, existing_facts: list[str] | None = None
+) -> tuple[list[str], list[str]]:
+    """Returns (facts_to_add, facts_to_remove). existing_facts should be
+    whichever of the user's already-known facts are relevant to this
+    message (e.g. main.py's own retrieve(user_id, transcript) call,
+    which the Redis cache in retrieve() below makes effectively free to
+    call again here with the same query) — without them, the model has
+    nothing to compare a correction against and can only ever add, never
+    supersede what it's correcting.
+    """
+    user_content = (
+        f"Existing known facts: {json.dumps(existing_facts or [])}\n\nNew message: {transcript}"
+    )
     messages = [
         {"role": "system", "content": _EXTRACT_SYSTEM_PROMPT},
-        {"role": "user", "content": transcript},
+        {"role": "user", "content": user_content},
     ]
     try:
         resp = await _get_openai().chat.completions.create(
@@ -134,39 +174,73 @@ async def extract_facts(user_id: str, transcript: str) -> list[str]:
     return _parse_facts_response(resp.choices[0].message.content)
 
 
-async def store(user_id: str, facts: list[str]) -> None:
-    if not facts:
+async def store(user_id: str, facts: list[str], remove: list[str] | None = None) -> None:
+    if not facts and not remove:
         return
-    embeddings, provider = await embed_documents(facts)
-    if len(embeddings) != len(facts):
-        # zip() below would otherwise silently truncate to the shorter
-        # list — confirmed live: gemini-embedding-2 returned 1 embedding
-        # for 4 facts with no error, and only the first fact got saved.
-        # Fixed at the embedding_adapter.py source, but this stays as a
-        # hard stop against the same silent-data-loss shape recurring
-        # from a different provider quirk in the future.
-        raise RuntimeError(
-            f"embed_documents returned {len(embeddings)} embeddings for "
-            f"{len(facts)} facts (provider={provider}) — refusing to "
-            "silently save a truncated subset."
-        )
+    embeddings: list[list[float]] = []
+    provider = None
+    if facts:
+        embeddings, provider = await embed_documents(facts)
+        if len(embeddings) != len(facts):
+            # zip() below would otherwise silently truncate to the shorter
+            # list — confirmed live: gemini-embedding-2 returned 1 embedding
+            # for 4 facts with no error, and only the first fact got saved.
+            # Fixed at the embedding_adapter.py source, but this stays as a
+            # hard stop against the same silent-data-loss shape recurring
+            # from a different provider quirk in the future.
+            raise RuntimeError(
+                f"embed_documents returned {len(embeddings)} embeddings for "
+                f"{len(facts)} facts (provider={provider}) — refusing to "
+                "silently save a truncated subset."
+            )
     pool = await get_pool()
     async with pool.acquire() as conn, conn.transaction():
         # facts.user_id FK's users.id — lazily create the row rather than
         # requiring every caller to remember to do it first.
         await conn.execute("insert into users (id) values ($1) on conflict do nothing", user_id)
-        await conn.executemany(
-            "insert into facts (user_id, fact, embedding, embedding_provider) "
-            "values ($1, $2, $3::vector, $4)",
-            [
-                (user_id, fact, _to_vector_literal(emb), provider)
-                for fact, emb in zip(facts, embeddings)
-            ],
-        )
+        if remove:
+            # Same transaction as the insert below — a superseded fact and
+            # its replacement never both exist, and never neither, from
+            # any other reader's point of view. Matched by exact text,
+            # since extract_facts() is told to echo the old fact's
+            # original text back verbatim specifically so this matches.
+            await conn.executemany(
+                "delete from facts where user_id = $1 and fact = $2",
+                [(user_id, fact) for fact in remove],
+            )
+        if facts:
+            await conn.executemany(
+                "insert into facts (user_id, fact, embedding, embedding_provider) "
+                "values ($1, $2, $3::vector, $4)",
+                [
+                    (user_id, fact, _to_vector_literal(emb), provider)
+                    for fact, emb in zip(facts, embeddings)
+                ],
+            )
+    await _invalidate_cache(user_id)
+
+
+def _cache_key(user_id: str, k: int, query: str) -> str:
+    return f"sarjy:mem:{user_id}:{k}:{hashlib.sha256(query.encode()).hexdigest()}"
+
+
+async def _invalidate_cache(user_id: str) -> None:
+    # retrieve()'s cache key hashes the query text, so there's no way to
+    # target just the entries a given fact change could affect — every
+    # cached result for this user is invalidated instead, not just the
+    # ones that happen to mention the changed fact. Confirmed live: a
+    # user correcting a fact, then immediately re-asking the exact
+    # question that had already been cached (well inside the 60s TTL),
+    # got the pre-correction answer back — store() had updated Postgres
+    # correctly, retrieve() just never knew to stop trusting its cache.
+    r = _get_redis()
+    keys = [key async for key in r.scan_iter(match=f"sarjy:mem:{user_id}:*")]
+    if keys:
+        await r.delete(*keys)
 
 
 async def retrieve(user_id: str, query: str, k: int = 5) -> list[str]:
-    cache_key = f"sarjy:mem:{user_id}:{k}:{hashlib.sha256(query.encode()).hexdigest()}"
+    cache_key = _cache_key(user_id, k, query)
     r = _get_redis()
     if cached := await r.get(cache_key):
         return json.loads(cached)

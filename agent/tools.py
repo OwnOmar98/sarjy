@@ -239,7 +239,19 @@ class _PendingCancellation:
     created_at: float
 
 
-_pending: dict[str, "_PendingBooking | _PendingCancellation"] = {}
+@dataclass
+class _PendingEdit:
+    event_id: str
+    old_title: str
+    old_start: datetime
+    old_duration_minutes: int
+    new_title: str
+    new_start: datetime
+    new_duration_minutes: int
+    created_at: float
+
+
+_pending: dict[str, "_PendingBooking | _PendingCancellation | _PendingEdit"] = {}
 
 # Every mitigation that tries to *detect* a false confirmation upstream has
 # been tested and rejected (docs/HANDOFF.md): Whisper's own no_speech_prob
@@ -269,7 +281,19 @@ class _CompletedCancellation:
     completed_at: float
 
 
-_last_action: dict[str, "_CompletedBooking | _CompletedCancellation"] = {}
+@dataclass
+class _CompletedEdit:
+    event_id: str
+    old_title: str
+    old_start: datetime
+    old_duration_minutes: int
+    new_title: str
+    new_start: datetime
+    new_duration_minutes: int
+    completed_at: float
+
+
+_last_action: dict[str, "_CompletedBooking | _CompletedCancellation | _CompletedEdit"] = {}
 
 
 def _expire_stale(store: dict, ttl_s: float, stamp_attr: str) -> None:
@@ -336,31 +360,22 @@ async def propose_booking(
     )
 
 
-@function_tool
-async def propose_cancellation(
-    context: RunContext, start_time: str, title: str | None = None
-) -> str:
-    """Propose cancelling a calendar event — does not delete anything
-    yet. If you don't already know its exact start time, call
-    list_calendar_events or check_calendar_availability first to find
-    it — never guess a time just to cancel something.
-
-    Args:
-        start_time: ISO 8601 start time of the event to cancel — must
-            match an existing event (e.g. the value list_calendar_events
-            returned for it).
-        title: Optional — narrows the match if more than one event starts
-            at the same time.
+async def _find_single_event(
+    pool, user_id: str, start_time: str, title: str | None
+) -> tuple[object | None, str | None]:
+    """Resolves "the event at this time" (optionally narrowed by title) to
+    exactly one row, or an error string already worded for handing
+    straight back to the LLM. Shared by propose_cancellation and
+    propose_edit_event, which both start from the same "find the one
+    existing event the user means, then propose changing it" shape.
     """
-    user_id = context.userdata
     try:
         start = _parse_start_time(start_time)
     except ValueError:
-        return (
+        return None, (
             f"'{start_time}' isn't a specific time — ask the user for an exact time and try again."
         )
 
-    pool = await get_pool()
     if title:
         # Whitespace-insensitive match: STT routinely drops or adds a space
         # inside a two-word title ("TeamSync" for a booked "Team Sync"), and
@@ -383,7 +398,7 @@ async def propose_cancellation(
         )
 
     if not rows:
-        return (
+        return None, (
             f"No event found at {start.isoformat()}"
             + (f" matching '{title}'" if title else "")
             + " — call list_calendar_events to find the exact time first."
@@ -392,9 +407,32 @@ async def propose_cancellation(
         options = "; ".join(
             f"'{r['title']}' at {_to_local(r['start_time']).isoformat()}" for r in rows
         )
-        return f"More than one event matches — ask the user which one: {options}"
+        return None, f"More than one event matches — ask the user which one: {options}"
+    return rows[0], None
 
-    event = rows[0]
+
+@function_tool
+async def propose_cancellation(
+    context: RunContext, start_time: str, title: str | None = None
+) -> str:
+    """Propose cancelling a calendar event — does not delete anything
+    yet. If you don't already know its exact start time, call
+    list_calendar_events or check_calendar_availability first to find
+    it — never guess a time just to cancel something.
+
+    Args:
+        start_time: ISO 8601 start time of the event to cancel — must
+            match an existing event (e.g. the value list_calendar_events
+            returned for it).
+        title: Optional — narrows the match if more than one event starts
+            at the same time.
+    """
+    user_id = context.userdata
+    pool = await get_pool()
+    event, error = await _find_single_event(pool, user_id, start_time, title)
+    if error:
+        return error
+
     _pending[user_id] = _PendingCancellation(
         event_id=str(event["id"]),
         title=event["title"],
@@ -409,11 +447,116 @@ async def propose_cancellation(
 
 
 @function_tool
+async def propose_edit_event(
+    context: RunContext,
+    start_time: str,
+    title: str | None = None,
+    new_title: str | None = None,
+    new_start_time: str | None = None,
+    new_duration_minutes: int | str | None = None,
+) -> str:
+    """Propose renaming and/or rescheduling an existing calendar event —
+    does not change anything yet. Use this instead of cancelling and
+    re-booking whenever the user wants to change an event that already
+    exists (a new title, a new time, a new duration, or any combination)
+    rather than replace it with something unrelated. If you don't already
+    know its exact current start time, call list_calendar_events or
+    check_calendar_availability first — never guess a time just to edit
+    something.
+
+    Args:
+        start_time: ISO 8601 start time of the EXISTING event to change —
+            must match an existing event, same as propose_cancellation.
+        title: Optional — narrows the match if more than one event starts
+            at the same time.
+        new_title: The new title, if the user wants to rename it. Leave
+            unset to keep the current title.
+        new_start_time: The new start time, if the user wants to
+            reschedule it. Leave unset to keep the current time.
+        new_duration_minutes: The new length in minutes, if the user
+            wants to change it. Leave unset to keep the current duration.
+    """
+    if new_title is None and new_start_time is None and new_duration_minutes is None:
+        return "Nothing to change was given — ask the user what they want renamed or rescheduled."
+
+    user_id = context.userdata
+    pool = await get_pool()
+    event, error = await _find_single_event(pool, user_id, start_time, title)
+    if error:
+        return error
+
+    new_start = event["start_time"]
+    new_duration = event["duration_minutes"]
+    if new_start_time is not None:
+        try:
+            new_start = _parse_start_time(new_start_time)
+        except ValueError:
+            return (
+                f"'{new_start_time}' isn't a specific time — ask the user for an "
+                "exact new time and try again."
+            )
+    if new_duration_minutes is not None:
+        new_duration = _coerce_minutes(new_duration_minutes)
+
+    if new_start_time is not None or new_duration_minutes is not None:
+        new_end = new_start + timedelta(minutes=new_duration)
+        # Excludes the event being edited itself — it will always overlap
+        # its own current slot, which isn't a real conflict.
+        rows = await pool.fetch(
+            "select title, start_time from calendar_events "
+            "where user_id = $1 and id != $2 and start_time < $3 "
+            "and start_time + (duration_minutes::text || ' minutes')::interval > $4",
+            user_id,
+            event["id"],
+            new_end,
+            new_start,
+        )
+        if rows:
+            conflicts = "; ".join(
+                f"'{r['title']}' at {_to_local(r['start_time']).isoformat()}" for r in rows
+            )
+            return (
+                f"Not free at the new time — conflicts with: {conflicts}. Ask for a different time."
+            )
+
+    _pending[user_id] = _PendingEdit(
+        event_id=str(event["id"]),
+        old_title=event["title"],
+        old_start=event["start_time"],
+        old_duration_minutes=event["duration_minutes"],
+        new_title=new_title if new_title is not None else event["title"],
+        new_start=new_start,
+        new_duration_minutes=new_duration,
+        created_at=time.monotonic(),
+    )
+    changes = []
+    if new_title is not None:
+        changes.append(f"title to '{new_title}'")
+    if new_start_time is not None:
+        changes.append(f"time to {_to_local(new_start).isoformat()}")
+    if new_duration_minutes is not None:
+        changes.append(f"duration to {new_duration} minutes")
+    return (
+        f"Proposed changing '{event['title']}' at {_to_local(event['start_time']).isoformat()} — "
+        + ", ".join(changes)
+        + ". Relay this to the user and call confirm_pending_action once they actually confirm."
+    )
+
+
+@function_tool
 async def confirm_pending_action(context: RunContext) -> str:
-    """Actually execute the previously proposed booking or cancellation.
-    Only call this after the user gave a real, clear yes to what
-    propose_booking/propose_cancellation just described — never call it
-    speculatively or without a live proposal from this same conversation.
+    """Actually execute the previously proposed booking, cancellation, or
+    edit. Only call this after the user gave a real, clear yes to what
+    propose_booking/propose_cancellation/propose_edit_event just
+    described — never call it speculatively or without a live proposal
+    from this same conversation.
+
+    A yes does not have to be spelled a particular way. Speech recognition
+    mangles short words, and "نام"/"نعام" are known mishearings of "نعم" —
+    when one of those is the whole reply to a proposal you just described,
+    it is a confirmation. A reply containing both a refusal and an
+    affirmative is not; ask again instead. The full policy is in the agent's
+    own instructions (agent/affirmatives.py composes both from one list).
     """
     user_id = context.userdata
     _expire_stale(_pending, _PENDING_TTL_S, "created_at")
@@ -452,6 +595,32 @@ async def confirm_pending_action(context: RunContext) -> str:
             "they can ask you to undo it if that isn't what they meant."
         )
 
+    if isinstance(entry, _PendingEdit):
+        await pool.execute(
+            "update calendar_events set title = $2, start_time = $3, duration_minutes = $4 "
+            "where id = $1",
+            uuid.UUID(entry.event_id),
+            entry.new_title,
+            entry.new_start,
+            entry.new_duration_minutes,
+        )
+        _last_action[user_id] = _CompletedEdit(
+            event_id=entry.event_id,
+            old_title=entry.old_title,
+            old_start=entry.old_start,
+            old_duration_minutes=entry.old_duration_minutes,
+            new_title=entry.new_title,
+            new_start=entry.new_start,
+            new_duration_minutes=entry.new_duration_minutes,
+            completed_at=time.monotonic(),
+        )
+        return (
+            f"Updated — '{entry.new_title}' is now at {_to_local(entry.new_start).isoformat()} "
+            f"for {entry.new_duration_minutes} minutes. Say this back to the user as a natural "
+            "spoken sentence so they can hear exactly what changed, and tell them they can "
+            "ask you to undo it if that isn't what they meant."
+        )
+
     await pool.execute("delete from calendar_events where id = $1", uuid.UUID(entry.event_id))
     _last_action[user_id] = _CompletedCancellation(
         event_id=entry.event_id,
@@ -469,27 +638,42 @@ async def confirm_pending_action(context: RunContext) -> str:
 
 @function_tool
 async def undo_last_action(context: RunContext) -> str:
-    """Reverse the booking or cancellation that was just carried out — call
-    this whenever the user says the last change was wrong or wasn't what
-    they asked for ("undo that", "I didn't say yes", "تراجع", "ما قلت نعم").
-    Only the most recent completed action can be undone, and only shortly
-    after it happened.
+    """Reverse the booking, cancellation, or edit that was just carried
+    out — call this whenever the user says the last change was wrong or
+    wasn't what they asked for ("undo that", "I didn't say yes", "تراجع",
+    "ما قلت نعم"). Only the most recent completed action can be undone,
+    and only shortly after it happened.
     """
     user_id = context.userdata
     _expire_stale(_last_action, _UNDO_TTL_S, "completed_at")
     entry = _last_action.pop(user_id, None)
     if entry is None:
         return (
-            "There's no recent booking or cancellation to undo. Tell the user, and offer "
-            "to list their calendar if they want to check what's on it."
+            "There's no recent booking, cancellation, or edit to undo. Tell the user, and "
+            "offer to list their calendar if they want to check what's on it."
         )
     if time.monotonic() - entry.completed_at > _UNDO_TTL_S:
         return (
             "That change is too old to undo automatically. Tell the user, and offer to "
-            "book or cancel it directly instead."
+            "book, cancel, or edit it directly instead."
         )
 
     pool = await get_pool()
+    if isinstance(entry, _CompletedEdit):
+        await pool.execute(
+            "update calendar_events set title = $2, start_time = $3, duration_minutes = $4 "
+            "where id = $1 and user_id = $5",
+            uuid.UUID(entry.event_id),
+            entry.old_title,
+            entry.old_start,
+            entry.old_duration_minutes,
+            user_id,
+        )
+        return (
+            f"Undone — '{entry.old_title}' at {_to_local(entry.old_start).isoformat()} is back "
+            "to how it was. Confirm that to the user in one short natural sentence."
+        )
+
     if isinstance(entry, _CompletedBooking):
         # Delete by the id this booking actually wrote, not by time+title —
         # a later booking in the same slot must never be the one removed.

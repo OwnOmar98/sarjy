@@ -17,3 +17,22 @@ python run.py
 
 Requires the same env vars as `agent/` (LiveKit, DATABASE_URL, provider
 API keys) — loaded from `agent/.env` automatically outside CI.
+
+## stt_compare.py — offline STT comparison
+
+Runs fixture audio directly through each configured provider, no LiveKit room involved.
+Answers the questions `run.py` structurally cannot: which provider hears Arabic and
+code-switched speech better, what a non-speech clip turns into, and what Whisper's own
+confidence numbers look like on the clips that hallucinate.
+
+```
+python eval/stt_compare.py                       # all providers, all fixtures
+python eval/stt_compare.py --runs 2 --json out.json
+python eval/stt_compare.py --providers groq --sweep
+python eval/stt_compare.py --fixtures short_yes_ar --prompt-language ar
+```
+
+Exits non-zero if any non-speech fixture transcribes as something
+`agent/affirmatives.looks_affirmative()` accepts — the one outcome with no acceptable
+non-zero value. Costs real API calls on every provider it runs, so it is opt-in and not part
+of the CI eval run.

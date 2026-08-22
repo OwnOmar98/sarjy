@@ -36,12 +36,19 @@ from livekit.rtc import AudioFrame
 import conversations
 import memory
 import tts_cache
+from affirmatives import confirmation_policy
 from arabic_normalize import MAX_PATTERN_LEN, normalize_for_speech
 from db import ensure_user
-from language_detect import describe_for_llm, detect_code_switch
+from language_detect import (
+    LanguageTracker,
+    SpeechMetadata,
+    describe_for_llm,
+    detect_code_switch,
+    language_directive,
+)
 from latency import LatencyTracker
 from llm_adapter import build_llm
-from stt_adapter import build_stt
+from stt_adapter import build_stt, retune_for_language
 from tools import (
     check_calendar_availability,
     confirm_pending_action,
@@ -49,6 +56,7 @@ from tools import (
     list_calendar_events,
     propose_booking,
     propose_cancellation,
+    propose_edit_event,
     undo_last_action,
 )
 from tts_adapter import build_tts
@@ -93,10 +101,22 @@ _LEAK_MARKER = "<function="
 # propagate out and kill the whole turn with zero reply, spoken or shown.
 # This is the outer boundary that keeps any of them from going completely
 # silent, not a fix for one specific cause.
-_FALLBACK_MESSAGE = (
-    "Sorry, I ran into a problem there — could you try again? "
-    "عذرًا، واجهت مشكلة، ممكن تجرب مرة ثانية؟"
-)
+# One entry per language, not one bilingual string. The old single string said
+# the same sentence in English and then in Arabic — the exact
+# say-it-twice-as-a-translation pattern the agent's own instructions forbid,
+# modelled by the agent itself, and it lands in history as an assistant turn
+# where it becomes a bilingual anchor for every reply that follows. The `None`
+# entry is still bilingual on purpose: it is the one case where the language
+# genuinely isn't known yet, and guessing wrong there means apologising in a
+# language the user may not speak.
+_FALLBACK_MESSAGES: dict[str | None, str] = {
+    "en": "Sorry, I ran into a problem there — could you try again?",
+    "ar": "عذرًا، واجهت مشكلة، ممكن تجرب مرة ثانية؟",
+    None: (
+        "Sorry, I ran into a problem there — could you try again? "
+        "عذرًا، واجهت مشكلة، ممكن تجرب مرة ثانية؟"
+    ),
+}
 
 # docs/HANDOFF.md's diagnosed "early speech can be silently dropped" gap
 # (task #16): livekit-agents replaces user audio with silence before STT
@@ -108,9 +128,12 @@ _FALLBACK_MESSAGE = (
 # transcript showed up in time, covering this case and any other STT gap
 # (a slow/failed provider) the same way — this message plays instead of
 # leaving the user talking into silence.
-_MISSED_SPEECH_MESSAGE = (
-    "Sorry, I didn't catch that — could you say it again? عذرًا، لم ألتقط كلامك، ممكن تعيد؟"
-)
+# Per-language for the same reason as _FALLBACK_MESSAGES above.
+_MISSED_SPEECH_MESSAGES: dict[str | None, str] = {
+    "en": "Sorry, I didn't catch that — could you say it again?",
+    "ar": "عذرًا، لم ألتقط كلامك، ممكن تعيد؟",
+    None: "Sorry, I didn't catch that — could you say it again? عذرًا، لم ألتقط كلامك، ممكن تعيد؟",
+}
 
 # Deliberately longer than transcription_timeout (2.5s) so the SDK's own
 # net always fires first when it is armed; this only ever speaks for a turn
@@ -122,11 +145,12 @@ _MISSED_SPEECH_WATCHDOG_S = 4.0
 # agent says is LLM-generated and varies per turn, so it was never a
 # cache candidate; caching it would mean matching on content that's
 # different every time, which is a cache that never hits.
-_CACHEABLE_PHRASES = {_FALLBACK_MESSAGE, _MISSED_SPEECH_MESSAGE}
+_CACHEABLE_PHRASES = {*_FALLBACK_MESSAGES.values(), *_MISSED_SPEECH_MESSAGES.values()}
 
 
 async def _strip_leaked_tool_syntax(
     chunks: AsyncIterable[llm.ChatChunk],
+    language: str | None = None,
 ) -> AsyncIterator[llm.ChatChunk]:
     pending = ""
     last_id = "sanitized"
@@ -167,7 +191,10 @@ async def _strip_leaked_tool_syntax(
             )
         yield llm.ChatChunk(
             id="llm-error-fallback",
-            delta=llm.ChoiceDelta(role="assistant", content=_FALLBACK_MESSAGE),
+            delta=llm.ChoiceDelta(
+                role="assistant",
+                content=_FALLBACK_MESSAGES.get(language, _FALLBACK_MESSAGES[None]),
+            ),
         )
         return
 
@@ -335,8 +362,19 @@ async def _cached_tts_node(
 
 
 class SarjyAgent(Agent):
-    def __init__(self, latency: LatencyTracker) -> None:
+    def __init__(self, latency: LatencyTracker, language: LanguageTracker) -> None:
         self._latency = latency
+        # Rolling per-conversation language estimate, shared with entrypoint()
+        # so the STT-reported language recorded on user_input_transcribed and
+        # the retuning driven from it are the same object. See
+        # LanguageTracker's docstring for why the estimate is rolling rather
+        # than per-turn.
+        self._language = language
+        # Set by on_user_turn_completed, read by llm_node — see llm_node's
+        # own comment for why a tool-call follow-up needs a fresh,
+        # stronger reminder rather than trusting the copy already earlier
+        # in context.
+        self._last_language_meta: SpeechMetadata | None = None
         now = datetime.now(_DEFAULT_TZ)
         super().__init__(
             instructions=(
@@ -344,10 +382,10 @@ class SarjyAgent(Agent):
                 "(Asia/Riyadh time) — use this to resolve 'today', "
                 "'tomorrow', or a weekday name into an actual calendar "
                 "date yourself before calling propose_booking, "
-                "check_calendar_availability, or propose_cancellation; "
-                "never ask the user to restate a date/time that's already "
-                "unambiguous just because you need to convert it to ISO "
-                "8601 yourself. "
+                "check_calendar_availability, propose_cancellation, or "
+                "propose_edit_event; never ask the user to restate a "
+                "date/time that's already unambiguous just because you "
+                "need to convert it to ISO 8601 yourself. "
                 "You are Sarjy, a helpful bilingual (Arabic/English) voice "
                 "assistant. Judge the language of the user's last message "
                 "as a whole and reply in one of three modes: mostly "
@@ -377,33 +415,43 @@ class SarjyAgent(Agent):
                 "spoken sentence in whichever language you're replying "
                 'in ("الساعة أربعة وثلاث دقائق فجرًا", not "04:03"; '
                 '"today" or the actual date spoken naturally, not '
-                '"2026-08-13"). Booking and cancelling both go through '
-                "propose_booking/propose_cancellation first, then "
-                "confirm_pending_action — the actual write only happens "
-                "on that second call, so never treat a proposal as done "
-                "until you've confirmed it. propose_booking takes a "
-                "duration in minutes, not an end time — if the user gave "
-                'both ("between 1 and 2"), compute the duration yourself, '
-                "don't ask for it again; only ask first if it truly can't "
-                "be worked out. For cancelling, get the exact event time "
-                "first (list_calendar_events or check_calendar_availability "
-                "if you don't already know it) before proposing. After "
-                "either propose call, relay what it describes to the user "
-                "in one short sentence and wait for their actual next turn "
-                "— this is voice with no keyboard, so any clear spoken yes "
-                '("confirm", "yes", "go ahead", "نعم", "احجزها") counts, '
-                "never require an exact word or typing; a clear no or "
-                "changed details means propose again instead of "
-                "confirming. Never call confirm_pending_action without a "
-                "live proposal from this same conversation, and never in "
-                "the same turn the proposal was first made. After any "
-                "booking or cancellation actually goes through, always say "
-                "back what was written — the title and the time, spoken "
-                "naturally — and mention it can be undone; speech "
-                "recognition can mishear a confirmation, so hearing what "
-                "changed is the user's only way to catch that. If they say "
-                "the change was wrong, or that they never confirmed it, "
-                "call undo_last_action instead of arguing or re-asking."
+                '"2026-08-13"). Booking, cancelling, and editing all go '
+                "through propose_booking/propose_cancellation/"
+                "propose_edit_event first, then confirm_pending_action — "
+                "the actual write only happens on that second call, so "
+                "never treat a proposal as done until you've confirmed "
+                "it. propose_booking takes a duration in minutes, not an "
+                'end time — if the user gave both ("between 1 and 2"), '
+                "compute the duration yourself, don't ask for it again; "
+                "only ask first if it truly can't be worked out. As soon "
+                "as the user gives a specific start time for a new "
+                "booking, even before you have a title, call "
+                "check_calendar_availability right away using that time "
+                "(assume a 30-minute duration if none was given yet) — a "
+                "conflict makes the title irrelevant, so find that out "
+                "before asking for one; only ask for the title once you "
+                "know the slot is actually free. For "
+                "cancelling or editing, get the exact event time first "
+                "(list_calendar_events or check_calendar_availability if "
+                "you don't already know it) before proposing. Editing "
+                "(renaming, rescheduling, or changing the duration of an "
+                "event that already exists) always goes through "
+                "propose_edit_event, never a cancel-then-book pair — that "
+                "would lose the original event's identity and read to "
+                "the user as two separate actions instead of one change. "
+                "After any propose call, relay what it describes to the "
+                "user in one short sentence and wait for their actual "
+                "next turn. " + confirmation_policy() + " Never call confirm_pending_action "
+                "without a live proposal from this same conversation, and "
+                "never in the same turn the proposal was first made. "
+                "After any booking, cancellation, or edit actually goes "
+                "through, always say back what changed — the title and "
+                "the time, spoken naturally — and mention it can be "
+                "undone; speech recognition can mishear a confirmation, "
+                "so hearing what changed is the user's only way to catch "
+                "that. If they say the change was wrong, or that they "
+                "never confirmed it, call undo_last_action instead of "
+                "arguing or re-asking."
             ),
             tools=[
                 get_prayer_time,
@@ -411,6 +459,7 @@ class SarjyAgent(Agent):
                 list_calendar_events,
                 propose_booking,
                 propose_cancellation,
+                propose_edit_event,
                 confirm_pending_action,
                 undo_last_action,
             ],
@@ -419,8 +468,36 @@ class SarjyAgent(Agent):
     def llm_node(
         self, chat_ctx: llm.ChatContext, tools: list[llm.Tool], model_settings: ModelSettings
     ) -> AsyncIterator[llm.ChatChunk]:
+        # Re-injects a stronger, imperative language reminder right before
+        # the *follow-up* generation that comes after a tool call —
+        # llm_node fires once per LLM call within a turn, not once per
+        # turn, so a booking confirmation is two calls: one that decides
+        # to call confirm_pending_action, one that turns its result into
+        # the spoken reply. on_user_turn_completed's own tag sits right
+        # before the user's message; by the second call it's separated
+        # from the actual generation point by the function_call and
+        # function_call_output items, and confirmed live (reproduced
+        # directly against the real model/prompt/tools) that distance was
+        # enough for an earlier stretch of Arabic history to pull the
+        # reply back into Arabic despite the tag still technically being
+        # in context. Re-adding the same passive tag right here still
+        # wasn't enough in that same reproduction — only an explicit
+        # imperative ("you must reply in X") actually overrode it, hence
+        # language_directive rather than describe_for_llm here. Only
+        # fires when the tail is genuinely a tool result, not on every
+        # call — an already-close tag needs no reinforcement.
+        if (
+            self._last_language_meta
+            and chat_ctx.items
+            and isinstance(chat_ctx.items[-1], llm.FunctionCallOutput)
+            and (directive := language_directive(self._last_language_meta))
+        ):
+            chat_ctx.add_message(role="system", content=directive)
         return _strip_leaked_tool_syntax(
-            Agent.default.llm_node(self, chat_ctx, tools, model_settings)
+            Agent.default.llm_node(self, chat_ctx, tools, model_settings),
+            # If this generation fails outright, the apology should at least be
+            # in the language the user is speaking rather than in both.
+            language=self._language.estimate(),
         )
 
     def tts_node(
@@ -437,14 +514,31 @@ class SarjyAgent(Agent):
         if not text:
             return
 
-        # language_detect.py works off the plain transcript text, not
-        # anything STT provides — Groq never reliably reports even a
-        # single per-utterance language field (confirmed live: ev.language
-        # is empty on every real turn). Injected on every turn, mixed or
-        # not — see describe_for_llm's docstring for why a single-language
-        # turn needs this too, not just genuinely mixed ones.
-        if lang_context := describe_for_llm(detect_code_switch(text)):
-            turn_ctx.add_message(role="system", content=lang_context)
+        # The provider's own answer for what language the audio was, when it
+        # gave one — recorded by _on_user_input_transcribed as the transcript
+        # arrived. It beats counting script in the transcript because it is
+        # the only one of the two signals that survives a mis-transcription:
+        # English audio returned in Arabic script reads as "Arabic" to a
+        # script counter, and the reply instruction built from that is what
+        # answers an English speaker in Arabic.
+        reported = self._language.take_reported()
+        meta = detect_code_switch(text, reported_language=reported)
+        self._last_language_meta = meta
+        self._language.observe(meta)
+        if meta.transcript_disagrees:
+            logger.warning(
+                "language: STT reported %s but the transcript is %s — probable "
+                "mis-transcription; replying in %s",
+                meta.reported_language,
+                meta.script_language,
+                meta.primary_language,
+            )
+
+        # Retunes STT for the *next* turn from the rolling estimate, not from
+        # this one turn — see retune_for_language's and LanguageTracker's
+        # docstrings for why tuning the decoder off the transcript it produced
+        # is a feedback loop rather than an adaptation.
+        retune_for_language(self.session.stt, self._language.estimate())
 
         start = time.monotonic()
         facts = await memory.retrieve(self.session.userdata, text)
@@ -455,6 +549,18 @@ class SarjyAgent(Agent):
                 content="Known about this user, from past conversations:\n"
                 + "\n".join(f"- {f}" for f in facts),
             )
+
+        # Language tag goes in LAST, after the facts block, so it is the final
+        # thing before the user's own message. memory.py normalizes each fact
+        # into "whichever language reads best", so the facts block routinely
+        # carries Arabic sentences — and it used to be injected *after* the
+        # language tag, i.e. between the instruction and the message it
+        # applied to, putting an Arabic anchor closer to generation than the
+        # instruction telling the model to reply in English. Injected on every
+        # turn, mixed or not — see describe_for_llm's docstring for why a
+        # single-language turn needs this too.
+        if lang_context := describe_for_llm(meta):
+            turn_ctx.add_message(role="system", content=lang_context)
 
 
 # docs/PRD.md §5's second promise for the memory pillar ("memory feeds ASR
@@ -564,6 +670,10 @@ async def entrypoint(ctx: JobContext) -> None:
         logger.exception("db: failed to ensure user row — memory/sessions may fail this turn")
 
     latency = LatencyTracker(room=ctx.room, session_id=ctx.room.name)
+    # Shared by the session event handlers below (which record the language the
+    # STT provider reported) and SarjyAgent (which reads it back per turn and
+    # retunes the STT from it).
+    language_tracker = LanguageTracker()
 
     # Retrieved before the session is built, not after start(), because it
     # now feeds two things: the returning-user greeting (as before) and the
@@ -648,11 +758,15 @@ async def entrypoint(ctx: JobContext) -> None:
 
         ctx.add_shutdown_callback(_close_session)
 
+    # Distinctive proper nouns from this user's remembered facts — the only
+    # user-specific vocabulary this system has, and exactly what STT mangles.
+    keyterms = _keyterms_from_facts(known_facts)
+
     # TODO(day 2): swap LLM/TTS per request by language (docs/PRD.md §3-4).
     session = AgentSession[str](
         userdata=user_id,  # tools.py reads this via RunContext.userdata
         vad=ctx.proc.userdata["vad"],
-        stt=build_stt(ctx.proc.userdata["vad"]),
+        stt=build_stt(ctx.proc.userdata["vad"], keyterms=keyterms),
         llm=build_llm(),
         tts=build_tts(),
         # inference.TurnDetector() is AgentSession's own default when
@@ -684,7 +798,15 @@ async def entrypoint(ctx: JobContext) -> None:
         # Static terms only — the framework's LLM-based keyterm detection is
         # deliberately left off, since it adds a per-turn model call to a
         # pipeline whose latency is already the weakest measured pillar.
-        stt_context_options=STTContextOptions(keyterms=_keyterms_from_facts(known_facts)),
+        #
+        # Kept alongside build_stt's own `keyterms` argument, not replaced by
+        # it: this option only reaches a provider that advertises the framework
+        # keyterms capability (none of the three configured here do), so on its
+        # own it was wiring PRD §5's "memory feeds ASR vocabulary hints" to
+        # nothing. build_stt passes the same terms straight to the providers
+        # that actually take them. This stays so the wiring is already correct
+        # if a future provider does advertise the capability.
+        stt_context_options=STTContextOptions(keyterms=keyterms),
     )
 
     # Backstop for the "user spoke, got nothing back at all" issue.
@@ -733,6 +855,16 @@ async def entrypoint(ctx: JobContext) -> None:
         _publish_stage(latency, "speech_duration_proxy", time.monotonic() - _speech_started_at)
         _speech_started_at = None
 
+    def _missed_speech_message() -> str:
+        # In whichever language the conversation has settled into; bilingual
+        # only while it hasn't. Both call sites fire precisely when nothing was
+        # transcribed, so there is no current turn to read a language off —
+        # the rolling estimate is the only signal available here, which is one
+        # more reason it is worth keeping.
+        return _MISSED_SPEECH_MESSAGES.get(
+            language_tracker.estimate(), _MISSED_SPEECH_MESSAGES[None]
+        )
+
     def _cancel_missed_speech_watchdog() -> None:
         nonlocal _missed_speech_handle
         if _missed_speech_handle is not None:
@@ -765,7 +897,7 @@ async def entrypoint(ctx: JobContext) -> None:
             "watchdog: user speech ended with no transcript and no SDK timeout — "
             "replying with the missed-speech prompt"
         )
-        session.say(_MISSED_SPEECH_MESSAGE)
+        session.say(_missed_speech_message())
 
     @session.on("user_state_changed")
     def _on_user_state_changed(ev) -> None:
@@ -795,16 +927,20 @@ async def entrypoint(ctx: JobContext) -> None:
         # apology is spoken once, not twice.
         _note_transcript_seen()
         logger.warning("user spoke (%.2fs) but no transcript arrived in time", ev.speech_duration)
-        session.say(_MISSED_SPEECH_MESSAGE)
+        session.say(_missed_speech_message())
 
     @session.on("user_input_transcribed")
     def _on_user_input_transcribed(ev) -> None:
         if ev.transcript:
             _note_transcript_seen()
-        # Provider-reported language wins when one is actually given (not
-        # every STT provider/model reports one, see stt_adapter.py); a
+        # Provider-reported language wins when one is actually given; a
         # script-based guess off the transcript text otherwise (see
-        # _detect_language above).
+        # _detect_language above). Both the stock Groq plugin and OpenAI's
+        # gpt-transcribe report nothing here (docs/KNOWN_ISSUES.md #7) —
+        # VerboseGroqSTT and ElevenLabs Scribe both do, which is what makes
+        # this branch worth feeding into the language policy and not just into
+        # a trace column.
+        language_tracker.note_reported(ev.language)
         if ev.language:
             latency.set_language(ev.language)
         elif ev.transcript:
@@ -837,7 +973,7 @@ async def entrypoint(ctx: JobContext) -> None:
                 _fire_and_forget(conversations.add_message(db_session_id, "assistant", text))
 
     await session.start(
-        agent=SarjyAgent(latency=latency),
+        agent=SarjyAgent(latency=latency, language=language_tracker),
         room=ctx.room,
         room_input_options=RoomInputOptions(
             # Krisp noise cancellation — near-free on LiveKit Cloud.
@@ -875,8 +1011,26 @@ async def entrypoint(ctx: JobContext) -> None:
             + "; ".join(known_facts)
             + ". If their name is among these, greet them by name instead of generically."
         )
+        # "ar", not None. Under the old shared bilingual prompt, None was the
+        # only way to keep Arabic biasing on, because the prompt had exactly
+        # two states (with and without a "نعم" suffix). Each language now has
+        # its own prompt, so an Arabic-leaning returning user can actually be
+        # given the Arabic one instead of the bilingual compromise.
+        preferred_language_code = "en" if preferred_language == "English" else "ar"
     else:
         greeting_instructions = "Greet the user briefly in English, mention you also speak Arabic."
+        preferred_language_code = "en"
+
+    # Seeds STT's per-turn retuning (stt_adapter.py) before the user's own
+    # first turn even happens, rather than leaving it at build_stt()'s
+    # static default — the greeting itself is real signal for which
+    # language this turn is likely to come back in (a returning user's
+    # actual known language, or the fixed "greet in English" instruction
+    # for a new one), not a guess. Turn 1 was otherwise the one gap this
+    # retuning couldn't close on its own: on_user_turn_completed only
+    # fires from turn 2 onward, so nothing had retuned it yet.
+    language_tracker.seed(preferred_language_code)
+    retune_for_language(session.stt, preferred_language_code)
 
     if resume_summary:
         # Additive, not a replacement for the known_facts greeting above —
@@ -895,8 +1049,15 @@ async def entrypoint(ctx: JobContext) -> None:
 
 async def _remember(user_id: str, transcript: str) -> None:
     try:
-        facts = await memory.extract_facts(user_id, transcript)
-        await memory.store(user_id, facts)
+        # Same query on_user_turn_completed's own retrieve() call already
+        # made for this exact transcript — retrieve()'s Redis cache makes
+        # this effectively free, not a second real lookup. Without this,
+        # extract_facts() has nothing to compare a correction against and
+        # can only ever add a fact, never supersede the one it corrects
+        # (memory.py's own docstring).
+        existing = await memory.retrieve(user_id, transcript)
+        to_add, to_remove = await memory.extract_facts(user_id, transcript, existing)
+        await memory.store(user_id, to_add, remove=to_remove)
     except Exception:
         logger.exception("memory: failed to extract/store facts")
 
