@@ -96,4 +96,18 @@ export default defineNuxtConfig({
       livekitUrl: "",
     },
   },
+  nitro: {
+    cloudflare: {
+      // Both default to auto-detecting "is this build actually running on
+      // Cloudflare's own CI" (via std-env), which is false for a GitHub
+      // Actions-driven deploy (package.json's build:cloudflare/deploy:cloudflare) —
+      // without forcing these on, node compat stays off and Nitro never
+      // writes .output/server/wrangler.json, so `wrangler deploy` has
+      // nothing to read. Harmless for the default node-server preset
+      // (npm run build/dev/typecheck) — only the cloudflare_module preset
+      // reads this block at all.
+      deployConfig: true,
+      nodeCompat: true,
+    },
+  },
 });

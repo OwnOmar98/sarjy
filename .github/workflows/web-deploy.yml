@@ -1,0 +1,58 @@
+name: web-deploy
+
+# Web frontend deploys to Cloudflare Workers (web/wrangler.jsonc) instead of
+# Vercel. Runs from GitHub Actions rather than Cloudflare's own Git
+# integration, so nuxt.config.ts forces nitro.cloudflare.deployConfig/
+# nodeCompat on explicitly rather than relying on Cloudflare's own-CI
+# auto-detection (std-env's `provider`, which never matches from here).
+on:
+  push:
+    branches: [main]
+    paths:
+      - "web/**"
+      - ".github/workflows/web-deploy.yml"
+  workflow_dispatch: {}
+
+defaults:
+  run:
+    working-directory: web
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    concurrency:
+      group: web-deploy
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - run: npm ci
+      - run: npm run build:cloudflare
+
+      - name: Sync secrets
+        # Same LIVEKIT_*/DATABASE_URL secrets agent-deploy.yml already syncs
+        # to Fly — same LiveKit project and same Neon database, just a
+        # second consumer of the same values, not a second set to maintain.
+        run: |
+          npx wrangler secret bulk --config .output/server/wrangler.json <<EOF
+          {
+            "NUXT_LIVEKIT_API_KEY": "${{ secrets.LIVEKIT_API_KEY }}",
+            "NUXT_LIVEKIT_API_SECRET": "${{ secrets.LIVEKIT_API_SECRET }}",
+            "NUXT_DATABASE_URL": "${{ secrets.DATABASE_URL }}",
+            "NUXT_PUBLIC_LIVEKIT_URL": "${{ secrets.LIVEKIT_URL }}"
+          }
+          EOF
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+
+      - name: Deploy
+        run: npx wrangler deploy --config .output/server/wrangler.json
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

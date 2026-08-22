@@ -9,6 +9,12 @@ node_modules/
 .output/
 dist/
 
+# wrangler (web/) — local dev/deploy state, incl. .wrangler/deploy/config.json
+# (an absolute path to this machine's .output, meaningless on another one)
+.wrangler/
+.dev.vars
+.dev.vars.*
+
 # python (agent/)
 __pycache__/
 *.pyc
