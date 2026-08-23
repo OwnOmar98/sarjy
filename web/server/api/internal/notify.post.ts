@@ -71,6 +71,16 @@ export default defineEventHandler(async (event) => {
     });
   }
 
-  cf.durable.publish(body.identity, JSON.stringify(body.event));
+  // TEMPORARY diagnostic try/catch — reverting once the production 500
+  // this is chasing is actually identified.
+  try {
+    cf.durable.publish(body.identity, JSON.stringify(body.event));
+  } catch (err) {
+    return {
+      ok: false,
+      diagnosticError: err instanceof Error ? err.message : String(err),
+      diagnosticStack: err instanceof Error ? err.stack : undefined,
+    };
+  }
   return { ok: true, delivered: true };
 });
