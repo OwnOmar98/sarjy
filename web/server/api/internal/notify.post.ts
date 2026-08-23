@@ -26,10 +26,66 @@
 // or if this ever runs on Vercel — event.context.cloudflare is
 // undefined entirely, so this just no-ops: nothing to publish to, and
 // the sidebar's existing fetch-on-load path is correct without it.
+
+// Cloudflare's own hibernatable-WebSocket state, as crossws's
+// cloudflare-durable adapter attaches it to each socket (subscribe() ->
+// state.t.add(topic) -> ws.serializeAttachment(state) — see
+// node_modules/crossws/dist/adapters/cloudflare-durable.mjs's
+// getAttachedState/setAttachedState). Read directly here rather than
+// through crossws's own API — see publishToTopic below for why.
+interface CloudflareWebSocket {
+  deserializeAttachment(): { t?: Set<string> } | null;
+  send(data: string): void;
+}
+interface DurableObjectLike {
+  ctx: { getWebSockets(): CloudflareWebSocket[] };
+}
+
+// Broadcasts to every socket subscribed to `topic`, individually —
+// deliberately not cf.durable.publish() (crossws's own method).
+// Reproduced live in production: that method finds only the *first*
+// peer subscribed to the topic, and if sending to it throws, gives up
+// entirely — nothing else subscribed to that topic gets the message
+// either, not just the one bad connection. A tab closed without a clean
+// handshake, a network drop, a phone locking mid-call: all of these
+// leave a stale entry in Workers' own ctx.getWebSockets() list (this
+// app's Durable Object is one shared instance for every user, so it
+// accumulates across everyone's connections over the app's lifetime),
+// and crossws's fan-out has no resilience against hitting one before it
+// reaches a live connection later in the list. This iterates the same
+// raw list directly and isolates each send in its own try/catch, so one
+// dead socket can never block delivery to the rest.
+function publishToTopic(
+  durable: DurableObjectLike,
+  topic: string,
+  data: string,
+): number {
+  let delivered = 0;
+  for (const ws of durable.ctx.getWebSockets()) {
+    let state: { t?: Set<string> } | null;
+    try {
+      state = ws.deserializeAttachment();
+    } catch {
+      continue;
+    }
+    if (!state?.t?.has(topic)) continue;
+    try {
+      ws.send(data);
+      delivered++;
+    } catch (err) {
+      console.error(
+        "notify: dropping a stale websocket that failed to send",
+        err,
+      );
+    }
+  }
+  return delivered;
+}
+
 export default defineEventHandler(async (event) => {
   const cf = event.context.cloudflare as
     | {
-        durable?: { publish: (topic: string, data: string) => void };
+        durable?: DurableObjectLike;
         durableFetch?: (req: Request) => Promise<Response>;
       }
     | undefined;
@@ -71,30 +127,21 @@ export default defineEventHandler(async (event) => {
     });
   }
 
+  let delivered = 0;
   try {
-    cf.durable.publish(body.identity, JSON.stringify(body.event));
+    delivered = publishToTopic(
+      cf.durable,
+      body.identity,
+      JSON.stringify(body.event),
+    );
   } catch (err) {
-    // Reproduced live in production: "Cannot perform I/O on behalf of a
-    // different Durable Object" — crossws's cloudflare-durable adapter
-    // fans a publish() out by reading Workers' own ctx.getWebSockets()
-    // directly (server/routes/ws.ts's underlying library, not this
-    // file), bypassing its own peer bookkeeping that otherwise drops a
-    // connection on close. If a socket in that platform-level list has
-    // gone stale — a tab closed without a clean handshake, a network
-    // drop, a phone locking mid-connection, all of which happen in
-    // ordinary use — the very first unguarded .send() to it throws, and
-    // since the DO is one shared instance for every user, that single
-    // stale connection took down delivery for everyone, not just its
-    // own tab: this is what actually happened. Nothing in this app's
-    // code can safely reach into that list to prune the dead entry
-    // (crossws exposes no API for it) — logging and returning
-    // gracefully instead of a raw 500 is the mitigation available at
-    // this layer; the agent already treats any non-2xx as best-effort
-    // (web_notify.py never surfaces a failure past a warning either
-    // way), so this doesn't change behavior there, only makes the
-    // failure visible and non-fatal here instead of opaque.
-    console.error("notify: durable.publish() failed", err);
+    // getWebSockets() itself throwing would be a different, worse
+    // failure than a single dead socket (which publishToTopic already
+    // isolates) — kept as an outer net rather than letting it propagate
+    // as a raw 500, same reasoning as every other best-effort boundary
+    // in this file.
+    console.error("notify: publishToTopic failed", err);
     return { ok: false, delivered: false };
   }
-  return { ok: true, delivered: true };
+  return { ok: true, delivered: delivered > 0 };
 });
