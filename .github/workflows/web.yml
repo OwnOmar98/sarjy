@@ -23,3 +23,7 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run build
+      # Catches a Workers-incompatible change (e.g. a Node-only import
+      # slipping back into a server/ route) at PR time, not at deploy time —
+      # doesn't need real secrets, just needs to build and boot.
+      - run: npm run build:cloudflare
