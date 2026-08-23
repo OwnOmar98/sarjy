@@ -38,7 +38,15 @@ jobs:
             REDIS_URL="${{ secrets.REDIS_URL }}" \
             LIVEKIT_URL="${{ secrets.LIVEKIT_URL }}" \
             LIVEKIT_API_KEY="${{ secrets.LIVEKIT_API_KEY }}" \
-            LIVEKIT_API_SECRET="${{ secrets.LIVEKIT_API_SECRET }}"
+            LIVEKIT_API_SECRET="${{ secrets.LIVEKIT_API_SECRET }}" \
+            WEB_NOTIFY_URL="${{ vars.WEB_NOTIFY_URL }}" \
+            WEB_NOTIFY_SECRET="${{ secrets.INTERNAL_NOTIFY_SECRET }}"
+        # WEB_NOTIFY_URL is a repo *variable*, not a secret — it's a public
+        # endpoint any browser already calls the app's own domain for, so
+        # there's nothing confidential in it; the actual auth boundary is
+        # WEB_NOTIFY_SECRET. Kept out of a literal here specifically
+        # because this one's expected to change once the Cloudflare Worker
+        # gets a custom domain — a variable update needs no code change.
         env:
           FLY_API_TOKEN: ${{ secrets.FLY_API_TOKEN }}
 

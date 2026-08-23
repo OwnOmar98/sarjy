@@ -39,6 +39,12 @@ const sidebarOpen = ref(false);
 const sidebarRef = ref<{ refresh: () => Promise<void> } | null>(null);
 const transcriptRef = ref<{ refresh: () => void } | null>(null);
 
+// The watch(connected) refresh below only fires for the tab that actually
+// ran the call — this is what a *second* open tab, or this same tab
+// finding out a background summarization job just finished, needs. Same
+// refresh() either way; this just adds another trigger for it.
+useLiveUpdates(() => sidebarRef.value?.refresh());
+
 function selectConversation(id: string) {
   conversationNotFound.value = false;
   navigateTo(`/c/${id}`);

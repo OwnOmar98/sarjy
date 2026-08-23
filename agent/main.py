@@ -36,6 +36,7 @@ from livekit.rtc import AudioFrame
 import conversations
 import memory
 import tts_cache
+import web_notify
 from affirmatives import confirmation_policy
 from arabic_normalize import MAX_PATTERN_LEN, normalize_for_speech
 from db import ensure_user
@@ -718,6 +719,12 @@ async def entrypoint(ctx: JobContext) -> None:
     if db_session_id is None:
         try:
             db_session_id = await conversations.start_session(user_id)
+            # A brand-new row, not a resumed one — this is the "a new
+            # conversation just appeared" moment the sidebar's live-update
+            # channel exists for (web/server/routes/ws.ts). A resumed
+            # session already has a row every open tab's already seen; its
+            # own sidebar-relevant moment is end_session below instead.
+            _fire_and_forget(web_notify.notify(user_id))
         except Exception:
             logger.exception("conversations: failed to open a session row")
 
@@ -753,6 +760,10 @@ async def entrypoint(ctx: JobContext) -> None:
         async def _close_session() -> None:
             try:
                 await conversations.end_session(db_session_id)
+                # The summary (or a rename via a future edit) just landed —
+                # every open tab's sidebar should reflect it without
+                # needing its own manual reload.
+                await web_notify.notify(user_id)
             except Exception:
                 logger.exception("conversations: failed to close/summarize session")
 
