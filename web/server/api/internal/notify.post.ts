@@ -71,16 +71,30 @@ export default defineEventHandler(async (event) => {
     });
   }
 
-  // TEMPORARY diagnostic try/catch — reverting once the production 500
-  // this is chasing is actually identified.
   try {
     cf.durable.publish(body.identity, JSON.stringify(body.event));
   } catch (err) {
-    return {
-      ok: false,
-      diagnosticError: err instanceof Error ? err.message : String(err),
-      diagnosticStack: err instanceof Error ? err.stack : undefined,
-    };
+    // Reproduced live in production: "Cannot perform I/O on behalf of a
+    // different Durable Object" — crossws's cloudflare-durable adapter
+    // fans a publish() out by reading Workers' own ctx.getWebSockets()
+    // directly (server/routes/ws.ts's underlying library, not this
+    // file), bypassing its own peer bookkeeping that otherwise drops a
+    // connection on close. If a socket in that platform-level list has
+    // gone stale — a tab closed without a clean handshake, a network
+    // drop, a phone locking mid-connection, all of which happen in
+    // ordinary use — the very first unguarded .send() to it throws, and
+    // since the DO is one shared instance for every user, that single
+    // stale connection took down delivery for everyone, not just its
+    // own tab: this is what actually happened. Nothing in this app's
+    // code can safely reach into that list to prune the dead entry
+    // (crossws exposes no API for it) — logging and returning
+    // gracefully instead of a raw 500 is the mitigation available at
+    // this layer; the agent already treats any non-2xx as best-effort
+    // (web_notify.py never surfaces a failure past a warning either
+    // way), so this doesn't change behavior there, only makes the
+    // failure visible and non-fatal here instead of opaque.
+    console.error("notify: durable.publish() failed", err);
+    return { ok: false, delivered: false };
   }
   return { ok: true, delivered: true };
 });
