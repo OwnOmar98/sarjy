@@ -55,7 +55,32 @@ def _get_openai() -> AsyncOpenAI:
     return _openai
 
 
-async def start_session(user_id: str) -> str:
+def _session_dict(row) -> dict:
+    # Same field set and shape web/server/api/sessions.get.ts's rows
+    # already have (asyncpg gives back datetime objects; web_notify.py
+    # sends this straight over HTTP as JSON, which needs plain strings) —
+    # this is what the sidebar's live-push handler expects to receive
+    # verbatim as a SessionSummary, not a shape it has to reshape first.
+    return {
+        "id": str(row["id"]),
+        "started_at": row["started_at"].isoformat(),
+        "updated_at": row["updated_at"].isoformat(),
+        "ended_at": row["ended_at"].isoformat() if row["ended_at"] else None,
+        "summary": row["summary"],
+    }
+
+
+def _message_dict(row) -> dict:
+    return {
+        "id": str(row["id"]),
+        "role": row["role"],
+        "content": row["content"],
+        "created_at": row["created_at"].isoformat(),
+    }
+
+
+async def start_session(user_id: str) -> tuple[str, dict]:
+    """(session_id, the row as a live-push-ready dict) — see _session_dict."""
     # sessions.user_id FK's users.id — lazily create the row rather than
     # requiring every caller to remember to do it first (same pattern as
     # memory.py's store() and tools.py's confirm_pending_action).
@@ -65,20 +90,33 @@ async def start_session(user_id: str) -> str:
     pool = await get_pool()
     async with pool.acquire() as conn, conn.transaction():
         await conn.execute("insert into users (id) values ($1) on conflict do nothing", user_id)
-        session_id = await conn.fetchval(
-            "insert into sessions (user_id) values ($1) returning id", user_id
+        row = await conn.fetchrow(
+            "insert into sessions (user_id) values ($1) "
+            "returning id, started_at, updated_at, ended_at, summary",
+            user_id,
         )
-    return str(session_id)
+    return str(row["id"]), _session_dict(row)
 
 
-async def add_message(session_id: str, role: str, content: str) -> None:
+async def add_message(session_id: str, role: str, content: str) -> dict:
+    """The inserted message as a live-push-ready dict — see _message_dict.
+
+    Also bumps sessions.updated_at, same as end_session's own write below:
+    without this, a resumed conversation someone is actively talking into
+    only moves back to the top of the web UI's most-recently-active sort
+    once the call ends, not while it's actually happening.
+    """
     pool = await get_pool()
-    await pool.execute(
-        "insert into messages (session_id, role, content) values ($1, $2, $3)",
-        session_id,
-        role,
-        content,
-    )
+    async with pool.acquire() as conn, conn.transaction():
+        row = await conn.fetchrow(
+            "insert into messages (session_id, role, content) values ($1, $2, $3) "
+            "returning id, role, content, created_at",
+            session_id,
+            role,
+            content,
+        )
+        await conn.execute("update sessions set updated_at = now() where id = $1", session_id)
+    return _message_dict(row)
 
 
 async def resume_context(session_id: str, user_id: str) -> tuple[bool, str | None]:
@@ -128,7 +166,8 @@ async def _summarize(transcript: str) -> str | None:
     return text
 
 
-async def end_session(session_id: str) -> None:
+async def end_session(session_id: str) -> dict:
+    """The updated row as a live-push-ready dict — see _session_dict."""
     # Always re-summarizes the *full* transcript fetched here, not just
     # whatever was said since the last close — correct by construction
     # for a reopened session (agent/main.py no longer creates a new row
@@ -144,8 +183,10 @@ async def end_session(session_id: str) -> None:
     # list actually sorts by (most recently *active*, not most recently
     # *created*), so sending a message in a reopened conversation is what
     # should move it back to the top of that list.
-    await pool.execute(
-        "update sessions set ended_at = now(), updated_at = now(), summary = $2 where id = $1",
+    row = await pool.fetchrow(
+        "update sessions set ended_at = now(), updated_at = now(), summary = $2 "
+        "where id = $1 returning id, started_at, updated_at, ended_at, summary",
         session_id,
         summary,
     )
+    return _session_dict(row)

@@ -718,13 +718,13 @@ async def entrypoint(ctx: JobContext) -> None:
     # persisted or summarized, everything else still works.
     if db_session_id is None:
         try:
-            db_session_id = await conversations.start_session(user_id)
+            db_session_id, session_row = await conversations.start_session(user_id)
             # A brand-new row, not a resumed one — this is the "a new
             # conversation just appeared" moment the sidebar's live-update
             # channel exists for (web/server/routes/ws.ts). A resumed
             # session already has a row every open tab's already seen; its
             # own sidebar-relevant moment is end_session below instead.
-            _fire_and_forget(web_notify.notify(user_id))
+            _fire_and_forget(web_notify.notify_session_upserted(user_id, session_row))
         except Exception:
             logger.exception("conversations: failed to open a session row")
 
@@ -759,11 +759,11 @@ async def entrypoint(ctx: JobContext) -> None:
         # tearing down, which a plain asyncio.create_task does not.
         async def _close_session() -> None:
             try:
-                await conversations.end_session(db_session_id)
+                session_row = await conversations.end_session(db_session_id)
                 # The summary (or a rename via a future edit) just landed —
                 # every open tab's sidebar should reflect it without
                 # needing its own manual reload.
-                await web_notify.notify(user_id)
+                await web_notify.notify_session_upserted(user_id, session_row)
             except Exception:
                 logger.exception("conversations: failed to close/summarize session")
 
@@ -975,13 +975,13 @@ async def entrypoint(ctx: JobContext) -> None:
             if text:
                 _fire_and_forget(_remember(user_id, text))
                 if db_session_id is not None:
-                    _fire_and_forget(conversations.add_message(db_session_id, "user", text))
+                    _fire_and_forget(_add_message_and_notify(user_id, db_session_id, "user", text))
         elif ev.item.role == "assistant":
             _publish_stage(latency, "llm_first_token", ev.item.metrics.get("llm_node_ttft"))
             _publish_stage(latency, "tts_first_byte", ev.item.metrics.get("tts_node_ttfb"))
             _publish_stage(latency, "total", ev.item.metrics.get("e2e_latency"))
             if db_session_id is not None and (text := ev.item.text_content):
-                _fire_and_forget(conversations.add_message(db_session_id, "assistant", text))
+                _fire_and_forget(_add_message_and_notify(user_id, db_session_id, "assistant", text))
 
     await session.start(
         agent=SarjyAgent(latency=latency, language=language_tracker),
@@ -1071,6 +1071,19 @@ async def _remember(user_id: str, transcript: str) -> None:
         await memory.store(user_id, to_add, remove=to_remove)
     except Exception:
         logger.exception("memory: failed to extract/store facts")
+
+
+async def _add_message_and_notify(user_id: str, session_id: str, role: str, content: str) -> None:
+    # One fire-and-forget task covering both, not two separate ones — the
+    # push needs the row add_message() just inserted (its real id and
+    # created_at, for SelectedConversationTranscript.vue's dedupe-by-id),
+    # so notifying has to happen after the insert actually lands, not
+    # just after it's been kicked off.
+    try:
+        message = await conversations.add_message(session_id, role, content)
+        await web_notify.notify_message_added(user_id, session_id, message)
+    except Exception:
+        logger.exception("conversations: failed to add message / notify")
 
 
 if __name__ == "__main__":

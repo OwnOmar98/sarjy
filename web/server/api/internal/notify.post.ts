@@ -1,13 +1,20 @@
 // Called by the agent (agent/web_notify.py) right after it writes
-// something the sidebar cares about — a new session starting, or a
-// session's summary finishing — so every open tab for that user can
-// refresh instantly instead of only on its own next page load.
+// something the sidebar or an open transcript cares about — a session
+// starting or finishing, or a single message being added — so every
+// open tab for that user can update instantly instead of only on its
+// own next page load.
 //
 // Reachable from the public internet (the agent runs on Fly.io, outside
 // Cloudflare), so it's the one route in this app that needs its own
 // auth: a shared secret, not the "trust the browser's own identity"
 // model every other route uses, since this one isn't the browser
 // calling it.
+//
+// This route never inspects `event`'s shape — it's a pure relay. The
+// payload contract lives in exactly two other places that actually have
+// to agree on it: agent/web_notify.py (what gets sent) and
+// app/composables/useLiveUpdates.ts (what gets consumed), both against
+// shared/types/conversation.ts's LiveUpdateEvent.
 //
 // Two-hop on Cloudflare: the Worker that actually receives this POST
 // isn't necessarily the same one holding the WebSocket connections —
@@ -31,7 +38,9 @@ export default defineEventHandler(async (event) => {
   }
 
   const secret = getHeader(event, "x-internal-secret");
-  const body = await readBody<{ identity?: string }>(event);
+  const body = await readBody<{ identity?: string; event?: LiveUpdateEvent }>(
+    event,
+  );
 
   if (!cf.durable) {
     // Forward into the Durable Object with a freshly-built Request, not
@@ -55,16 +64,13 @@ export default defineEventHandler(async (event) => {
   if (!expected || secret !== expected) {
     throw createError({ statusCode: 401, statusMessage: "unauthorized" });
   }
-  if (!body?.identity) {
+  if (!body?.identity || !body.event) {
     throw createError({
       statusCode: 400,
-      statusMessage: "identity is required",
+      statusMessage: "identity and event are required",
     });
   }
 
-  cf.durable.publish(
-    body.identity,
-    JSON.stringify({ type: "sessions-changed" }),
-  );
+  cf.durable.publish(body.identity, JSON.stringify(body.event));
   return { ok: true, delivered: true };
 });
