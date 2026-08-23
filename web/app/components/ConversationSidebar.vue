@@ -24,13 +24,10 @@ const emit = defineEmits<{
 const { getOrCreateIdentity } = useSarjyRoom();
 const { t, locale } = useI18n();
 
-interface SessionSummary {
-  id: string;
-  started_at: string;
-  updated_at: string;
-  ended_at: string | null;
-  summary: string | null;
-}
+// SessionSummary comes from shared/types/conversation.ts (Nuxt's shared/
+// layer, auto-imported both app- and server-side) — the same shape
+// server/api/sessions.get.ts's rows and a live "session-upserted" push
+// both already are, so upsertSession below never has to reshape either.
 
 interface SessionsPage {
   items: SessionSummary[];
@@ -49,17 +46,52 @@ const cursor = ref<string | null>(null);
 const hasLoadedOnce = ref(false);
 const infiniteScrollRef = ref<{ reset: (side?: string) => void } | null>(null);
 
+// Set by refresh() right before it re-arms v-infinite-scroll, so the very
+// next onLoad cycle knows to keep paging past just one page. Read once by
+// onLoad and cleared immediately — v-infinite-scroll only exposes reset(),
+// not a way to set its internal status directly, so the *only* way to page
+// through several fetches while keeping that status correct is to do the
+// paging inside one onLoad call and call the real done() once at the end,
+// not to call reset() repeatedly from out here (each call after the list
+// is already fully caught up would re-fetch page 1 with no cursor and
+// duplicate it — cursor:null means "start of the list", not "the end").
+let catchUpTarget: { count: number; mustInclude: string | null } | null = null;
+
 async function onLoad({ done }: { done: LoadDone }) {
+  const target = catchUpTarget;
+  catchUpTarget = null;
   try {
-    const page = await $fetch<SessionsPage>("/api/sessions", {
-      query: {
-        identity: getOrCreateIdentity(),
-        cursor: cursor.value ?? undefined,
-      },
-    });
-    sessions.value.push(...page.items);
-    cursor.value = page.nextCursor;
-    done(page.nextCursor ? "ok" : "empty");
+    let status: "ok" | "empty" = "empty";
+    do {
+      const page = await $fetch<SessionsPage>("/api/sessions", {
+        query: {
+          identity: getOrCreateIdentity(),
+          cursor: cursor.value ?? undefined,
+        },
+      });
+      // A live "session-upserted" push (see upsertSession below) can land
+      // while this exact page is still in flight — e.g. the very first
+      // load, or a reconnect catch-up racing a push that arrives right
+      // after the socket reopens. Without this filter that session would
+      // appear twice: once from upsertSession, once from this page.
+      const alreadyLoaded = new Set(sessions.value.map((s) => s.id));
+      sessions.value.push(
+        ...page.items.filter((s) => !alreadyLoaded.has(s.id)),
+      );
+      cursor.value = page.nextCursor;
+      status = page.nextCursor ? "ok" : "empty";
+      // A brand-new conversation from elsewhere shifts everything below it
+      // down by one, so "loaded as many as before" alone can land just
+      // short of the previously-visible active one — checked every lap,
+      // not just once, since either target can need more than one page.
+    } while (
+      status === "ok" &&
+      target !== null &&
+      (sessions.value.length < target.count ||
+        (target.mustInclude !== null &&
+          !sessions.value.some((s) => s.id === target.mustInclude)))
+    );
+    done(status);
   } catch {
     // Not fatal — the app is fully usable without history; a fresh
     // conversation with no memory of past ones is the same experience
@@ -70,7 +102,32 @@ async function onLoad({ done }: { done: LoadDone }) {
   }
 }
 
+// Called for every "session-upserted" live push (SarjyApp.vue) — a new
+// conversation appearing, or an existing one's summary/updated_at
+// changing. Always placed at the top rather than sorted in by
+// updated_at: both moments this fires (conversations.py's start_session
+// and end_session) set updated_at to essentially now, so the pushed
+// session is — by construction — never anything but the most recently
+// active one at the instant it arrives.
+function upsertSession(session: SessionSummary) {
+  const existingIndex = sessions.value.findIndex((s) => s.id === session.id);
+  if (existingIndex !== -1) sessions.value.splice(existingIndex, 1);
+  sessions.value.unshift(session);
+  hasLoadedOnce.value = true;
+}
+
+// Reconciliation after the WebSocket reconnects (useLiveUpdates.ts's
+// onReconnect) — not called on every live push anymore now that
+// upsertSession above patches the list directly, only when the socket
+// was actually disconnected for a stretch and may have missed pushes
+// that happened during the gap. Preserves whatever was already loaded
+// (and the active conversation specifically, wherever it ends up
+// landing) instead of collapsing back to a single page.
 function refresh() {
+  catchUpTarget = {
+    count: sessions.value.length,
+    mustInclude: props.selectedId,
+  };
   sessions.value = [];
   cursor.value = null;
   hasLoadedOnce.value = false;
@@ -82,7 +139,7 @@ function refresh() {
   infiniteScrollRef.value?.reset("end");
 }
 
-defineExpose({ refresh });
+defineExpose({ refresh, upsertSession });
 
 function formatDate(iso: string): string {
   return new Date(iso).toLocaleString(locale.value, {

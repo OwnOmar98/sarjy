@@ -36,8 +36,36 @@ const {
 const selectedSessionId = computed(() => props.initialSessionId ?? null);
 const conversationNotFound = ref(false);
 const sidebarOpen = ref(false);
-const sidebarRef = ref<{ refresh: () => Promise<void> } | null>(null);
-const transcriptRef = ref<{ refresh: () => void } | null>(null);
+const sidebarRef = ref<{
+  refresh: () => Promise<void>;
+  upsertSession: (session: SessionSummary) => void;
+} | null>(null);
+const transcriptRef = ref<{
+  refresh: () => void;
+  appendMessage: (message: TranscriptMessage) => void;
+} | null>(null);
+
+// Routes each live push (server/routes/ws.ts, via agent/web_notify.py) to
+// the one component that actually owns that data — a session always
+// belongs in the sidebar; a message only matters here if it's for the
+// conversation currently open, since a tab looking at a different one
+// has nothing to do with it. onReconnect is the fallback for whatever a
+// disconnected stretch might have missed — see useLiveUpdates.ts.
+useLiveUpdates({
+  onEvent(event) {
+    if (event.type === "session-upserted") {
+      sidebarRef.value?.upsertSession(event.session);
+    } else if (event.type === "message-added") {
+      if (event.sessionId === selectedSessionId.value) {
+        transcriptRef.value?.appendMessage(event.message);
+      }
+    }
+  },
+  onReconnect() {
+    sidebarRef.value?.refresh();
+    transcriptRef.value?.refresh();
+  },
+});
 
 function selectConversation(id: string) {
   conversationNotFound.value = false;

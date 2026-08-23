@@ -92,11 +92,24 @@ export default defineNuxtConfig({
     livekitApiKey: "",
     livekitApiSecret: "",
     databaseUrl: "",
+    // Shared secret the agent (agent/web_notify.py) presents when it pushes
+    // a live-update signal — see server/api/internal/notify.post.ts. That
+    // route is reachable from the public internet (the agent runs on
+    // Fly.io, outside Cloudflare), so it needs its own auth rather than
+    // the "trust the browser's own identity" model every other route uses.
+    internalNotifySecret: "",
     public: {
       livekitUrl: "",
     },
   },
   nitro: {
+    // Needed for server/routes/ws.ts (the sidebar's live-update channel) —
+    // off by default. Cheap for every other preset too: it's what makes
+    // the cloudflare-durable preset's WebSocket routing exist at all, and
+    // a no-op everywhere else that never opens one.
+    experimental: {
+      websocket: true,
+    },
     cloudflare: {
       // Both default to auto-detecting "is this build actually running on
       // Cloudflare's own CI" (via std-env), which is false for a GitHub
@@ -104,8 +117,8 @@ export default defineNuxtConfig({
       // without forcing these on, node compat stays off and Nitro never
       // writes .output/server/wrangler.json, so `wrangler deploy` has
       // nothing to read. Harmless for the default node-server preset
-      // (npm run build/dev/typecheck) — only the cloudflare_module preset
-      // reads this block at all.
+      // (npm run build/dev/typecheck) — only the cloudflare presets read
+      // this block at all.
       deployConfig: true,
       nodeCompat: true,
     },

@@ -46,12 +46,12 @@ function formatElapsed(ms: number): string {
   return `${minutes}:${seconds.toString().padStart(2, "0")}`;
 }
 
-interface Message {
-  id: string;
-  role: string;
-  content: string;
-  created_at: string;
-}
+// TranscriptMessage comes from shared/types/conversation.ts (Nuxt's
+// shared/ layer) — the same shape server/api/sessions/[id]/messages.get.ts's
+// rows and a live "message-added" push both already are. Aliased locally
+// so every other reference in this file (and the template) didn't need
+// renaming.
+type Message = TranscriptMessage;
 
 interface MessagesPage {
   items: Message[];
@@ -98,20 +98,45 @@ const SCROLL_BOTTOM_THRESHOLD_PX = 80;
 // conversations. The API already returns each page oldest-first, so
 // every page (including the first) is unshifted onto the front, not
 // pushed onto the end.
+//
+// Set by refresh() right before it re-arms v-infinite-scroll — same
+// reasoning as ConversationSidebar.vue's identical catchUpTarget: paging
+// through several fetches while keeping v-infinite-scroll's own status
+// correct means doing all of it inside one onLoad call and calling the
+// real done() once at the end, not calling reset() repeatedly from out
+// here.
+let catchUpTarget: number | null = null;
+
 async function onLoad({ done }: { done: LoadDone }) {
+  const target = catchUpTarget;
+  catchUpTarget = null;
   try {
-    const page = await $fetch<MessagesPage>(
-      `/api/sessions/${props.sessionId}/messages`,
-      {
-        query: {
-          identity: getOrCreateIdentity(),
-          cursor: cursor.value ?? undefined,
+    let status: "ok" | "empty" = "empty";
+    do {
+      const page = await $fetch<MessagesPage>(
+        `/api/sessions/${props.sessionId}/messages`,
+        {
+          query: {
+            identity: getOrCreateIdentity(),
+            cursor: cursor.value ?? undefined,
+          },
         },
-      },
+      );
+      // A live "message-added" push (see appendMessage below) can land
+      // while this exact page is still in flight — same race as
+      // ConversationSidebar.vue's identical guard.
+      const alreadyLoaded = new Set(messages.value.map((m) => m.id));
+      messages.value.unshift(
+        ...page.items.filter((m) => !alreadyLoaded.has(m.id)),
+      );
+      cursor.value = page.nextCursor;
+      status = page.nextCursor ? "ok" : "empty";
+    } while (
+      status === "ok" &&
+      target !== null &&
+      messages.value.length < target
     );
-    messages.value.unshift(...page.items);
-    cursor.value = page.nextCursor;
-    done(page.nextCursor ? "ok" : "empty");
+    done(status);
   } catch (err) {
     if (
       !!err &&
@@ -128,12 +153,37 @@ async function onLoad({ done }: { done: LoadDone }) {
   }
 }
 
+// Reconciliation after the WebSocket reconnects (useLiveUpdates.ts's
+// onReconnect), a genuinely different conversation being opened, or this
+// same tab's own call just ending — not called on every live push
+// anymore now that appendMessage below patches the array directly, only
+// when something might actually have been missed. Preserves as much
+// history as was already loaded, the same reasoning as
+// ConversationSidebar.vue's refresh().
 function refresh() {
+  catchUpTarget = messages.value.length;
   messages.value = [];
   cursor.value = null;
   hasLoadedOnce.value = false;
   notFound.value = false;
   infiniteScrollRef.value?.reset("start");
+}
+
+// Called for every "message-added" live push whose sessionId matches
+// this conversation (SarjyApp.vue filters that before calling in —
+// tabs looking at a *different* conversation ignore the push entirely).
+// Always appended at the end: unlike a session, a message never needs
+// re-sorting, it's simply the newest thing that's happened.
+function appendMessage(message: Message) {
+  if (messages.value.some((m) => m.id === message.id)) return;
+  messages.value.push(message);
+  // Same "don't yank the view if the reader scrolled into history" rule
+  // as the liveEntries watcher below — a message arriving for this
+  // conversation from elsewhere is exactly as disruptive to fight past
+  // scroll-up as this tab's own live reply would be.
+  if (hasLoadedOnce.value && !showScrollToBottom.value) {
+    nextTick(() => scrollToBottom("smooth"));
+  }
 }
 
 // This component stays mounted across a straight past-conversation-to-
@@ -148,7 +198,7 @@ watch(() => props.sessionId, refresh);
 // above never fires there, and without this the new messages the call
 // just added stayed invisible until an unrelated navigation happened to
 // remount the component (confirmed live).
-defineExpose({ refresh });
+defineExpose({ refresh, appendMessage });
 
 function scrollContainer(): HTMLElement | null {
   // v-infinite-scroll's root element *is* the scrollable box (its own

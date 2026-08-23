@@ -1,12 +1,25 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  // Just the identity + pin. Nitro's cloudflare_module preset (nuxt.config.ts
-  // reads NITRO_PRESET, see package.json's build:cloudflare) computes `main`,
-  // `assets`, and `compatibility_flags` itself at build time and merges this
-  // file's values into .output/server/wrangler.json — that generated file,
-  // not this one, is what `wrangler dev`/`deploy --config .output/server/wrangler.json`
-  // actually reads. Runtime secrets (LiveKit keys, DATABASE_URL) are
-  // deliberately not here — see web-deploy.yml's "Sync secrets" step.
+  // Just the identity + pin, plus the one binding Nitro's cloudflare-durable
+  // preset can't compute for us (durable_objects/migrations — everything
+  // else here). NITRO_PRESET (package.json's build:cloudflare) computes
+  // `main`, `assets`, and `compatibility_flags` itself at build time and
+  // merges this file's values into .output/server/wrangler.json — that
+  // generated file, not this one, is what `wrangler dev`/`deploy --config
+  // .output/server/wrangler.json` actually reads. Runtime secrets (LiveKit
+  // keys, DATABASE_URL) are deliberately not here — see web-deploy.yml's
+  // "Sync secrets" step.
   "name": "sarjy-web",
   "compatibility_date": "2025-07-15",
+  // "$DurableObject" (binding name and class name both) is Nitro's own
+  // fixed name for the single generic Durable Object its cloudflare-durable
+  // preset generates (node_modules/nitropack/.../cloudflare-durable.mjs) —
+  // not something this app named. server/routes/ws.ts's WebSocket
+  // connections and server/api/internal/notify.post.ts's publish() both go
+  // through this one instance; every connected user is a different pub/sub
+  // topic within it (see ws.ts), not a different Durable Object.
+  "durable_objects": {
+    "bindings": [{ "name": "$DurableObject", "class_name": "$DurableObject" }],
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["$DurableObject"] }],
 }

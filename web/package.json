@@ -9,7 +9,7 @@
     "preview": "nuxt preview",
     "postinstall": "nuxt prepare",
     "typecheck": "nuxt typecheck",
-    "build:cloudflare": "NITRO_PRESET=cloudflare_module nuxt build",
+    "build:cloudflare": "NITRO_PRESET=cloudflare_durable nuxt build",
     "preview:cloudflare": "npm run build:cloudflare && wrangler dev --config .output/server/wrangler.json",
     "deploy:cloudflare": "npm run build:cloudflare && wrangler deploy --config .output/server/wrangler.json"
   },
