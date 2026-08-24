@@ -34,5 +34,17 @@ export default {
   openMenu: "Open menu",
   conversationNotFound: "Conversation not found.",
   scrollToBottom: "Scroll to most recent",
+  logIn: "Log in",
+  logOut: "Log out",
+  signUp: "Sign up",
+  email: "Email",
+  password: "Password",
+  pleaseWait: "Please wait…",
+  needAccount: "Need an account? Sign up",
+  haveAccount: "Already have an account? Log in",
+  invalidCredentials: "Incorrect email or password.",
+  emailAlreadyInUse: "That email is already in use.",
+  invalidSignupDetails:
+    "Enter a valid email and a password at least 8 characters long.",
   $vuetify,
 };

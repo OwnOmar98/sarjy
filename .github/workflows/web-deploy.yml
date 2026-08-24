@@ -45,7 +45,8 @@ jobs:
             "NUXT_LIVEKIT_API_SECRET": "${{ secrets.LIVEKIT_API_SECRET }}",
             "NUXT_DATABASE_URL": "${{ secrets.DATABASE_URL }}",
             "NUXT_PUBLIC_LIVEKIT_URL": "${{ secrets.LIVEKIT_URL }}",
-            "NUXT_INTERNAL_NOTIFY_SECRET": "${{ secrets.INTERNAL_NOTIFY_SECRET }}"
+            "NUXT_INTERNAL_NOTIFY_SECRET": "${{ secrets.INTERNAL_NOTIFY_SECRET }}",
+            "NUXT_SESSION_SECRET": "${{ secrets.SESSION_SECRET }}"
           }
           EOF
         env:

@@ -8,6 +8,20 @@ create table
         created_at timestamptz not null default now ()
     );
 
+-- Optional signup/login (docs/PLAN_AUTH.md) — nullable, since every
+-- anonymous identity (still the default) has neither. email is
+-- case-normalized before it's ever written (web/server/utils/auth.ts),
+-- so the uniqueness index below only has to compare, not itself fold
+-- case — no citext extension needed for that, and only `vector` is
+-- installed anyway.
+alter table users
+add column if not exists email text;
+
+alter table users
+add column if not exists password_hash text;
+
+create unique index if not exists users_email_lower_idx on users (lower(email));
+
 -- Extracted durable facts, embedded for retrieval — not raw transcript
 -- (agent/memory.py extract_facts()).
 create table

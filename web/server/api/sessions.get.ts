@@ -1,7 +1,9 @@
-// Lists past conversations for one browser identity — scoped by identity
-// query param the same way token.get.ts is, not by any auth (docs/PRD.md
-// non-goals: no auth). A session with no summary (too short/trivial, or
-// still in progress) is a real, expected state, not an error.
+// Lists past conversations for one identity — resolved the same way
+// token.get.ts's is (server/utils/auth.ts's resolveIdentity: a session
+// cookie wins when present, otherwise the client-supplied identity query
+// param, same as before optional signup/login existed). A session with no
+// summary (too short/trivial, or still in progress) is a real, expected
+// state, not an error.
 //
 // Sorted by updated_at, not started_at — "continue" reopens the same
 // session row (agent/main.py, agent/conversations.py) rather than
@@ -18,7 +20,9 @@
 const PAGE_SIZE = 20;
 
 export default defineEventHandler(async (event) => {
-  const identity = getQuery(event).identity?.toString();
+  const identity = await resolveIdentity(getSessionCookieValue(event), {
+    queryIdentity: getQuery(event).identity?.toString(),
+  });
   if (!identity) {
     throw createError({
       statusCode: 400,

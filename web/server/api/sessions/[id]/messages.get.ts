@@ -28,7 +28,9 @@ const UUID_RE =
 
 export default defineEventHandler(async (event) => {
   const sessionId = getRouterParam(event, "id");
-  const identity = getQuery(event).identity?.toString();
+  const identity = await resolveIdentity(getSessionCookieValue(event), {
+    queryIdentity: getQuery(event).identity?.toString(),
+  });
   if (!identity) {
     throw createError({
       statusCode: 400,

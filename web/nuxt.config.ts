@@ -98,6 +98,11 @@ export default defineNuxtConfig({
     // Fly.io, outside Cloudflare), so it needs its own auth rather than
     // the "trust the browser's own identity" model every other route uses.
     internalNotifySecret: "",
+    // Signs the sarjy_session cookie (server/utils/auth.ts) for optional
+    // signup/login (docs/PLAN_AUTH.md). Unlike internalNotifySecret, this
+    // is web-only — the agent never presents or verifies it, so it's only
+    // synced into web-deploy.yml, not agent-deploy.yml too.
+    sessionSecret: "",
     public: {
       livekitUrl: "",
     },

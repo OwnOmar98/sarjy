@@ -113,6 +113,12 @@ watch(connected, async (isConnected, wasConnected) => {
 });
 
 const { locale, locales, t, setLocale } = useI18n();
+
+// Optional signup/login (docs/PLAN_AUTH.md) — none of the identity call
+// sites above need to change: resolveIdentity (server/utils/auth.ts)
+// transparently prefers the session cookie once one exists, so logging
+// in "just works" without touching connect()/getOrCreateIdentity().
+const { currentUser, authLoading, logout } = useAuth();
 </script>
 
 <template>
@@ -176,6 +182,27 @@ const { locale, locales, t, setLocale } = useI18n();
           {{ l.code.toUpperCase() }}
         </v-btn>
       </v-btn-toggle>
+
+      <!-- Same d-none d-sm-inline responsive treatment as the language
+      label above — authLoading hides this entirely for the one instant
+      before the initial /api/auth/me check resolves, rather than
+      flashing "Log in" and then possibly replacing it with the email. -->
+      <template v-if="!authLoading">
+        <span v-if="currentUser" class="d-none d-sm-inline text-body-2 me-2">
+          {{ currentUser.email }}
+        </span>
+        <button
+          v-if="currentUser"
+          type="button"
+          class="auth-link me-4"
+          @click="logout"
+        >
+          {{ t("logOut") }}
+        </button>
+        <NuxtLink v-else to="/login" class="auth-link me-4">
+          {{ t("logIn") }}
+        </NuxtLink>
+      </template>
     </v-toolbar>
 
     <div class="app-body">
@@ -476,6 +503,22 @@ const { locale, locales, t, setLocale } = useI18n();
   stroke: currentColor;
   stroke-width: 1.5;
   stroke-linecap: round;
+}
+
+.auth-link {
+  padding: 0;
+  font-family: "IBM Plex Sans", "IBM Plex Sans Arabic", sans-serif;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: var(--ink-muted);
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.auth-link:hover {
+  color: rgb(var(--v-theme-primary));
 }
 
 .aperture-button {
