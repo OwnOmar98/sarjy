@@ -33,5 +33,17 @@ export default {
   openMenu: "فتح القائمة",
   conversationNotFound: "المحادثة غير موجودة.",
   scrollToBottom: "الانتقال إلى الأحدث",
+  logIn: "تسجيل الدخول",
+  logOut: "تسجيل الخروج",
+  signUp: "إنشاء حساب",
+  email: "البريد الإلكتروني",
+  password: "كلمة المرور",
+  pleaseWait: "يرجى الانتظار…",
+  needAccount: "ليس لديك حساب؟ أنشئ واحدًا",
+  haveAccount: "لديك حساب بالفعل؟ سجّل الدخول",
+  invalidCredentials: "البريد الإلكتروني أو كلمة المرور غير صحيحة.",
+  emailAlreadyInUse: "هذا البريد الإلكتروني مستخدم بالفعل.",
+  invalidSignupDetails:
+    "أدخل بريدًا إلكترونيًا صالحًا وكلمة مرور لا تقل عن 8 أحرف.",
   $vuetify,
 };

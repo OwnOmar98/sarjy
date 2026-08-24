@@ -4,17 +4,35 @@
 import { Room, RoomEvent, Track, type Participant } from "livekit-client";
 
 // Anonymous per-browser identity (docs/PRD.md non-goals: no auth, just
-// this + a "forget me" button). Memory keys facts off this id — a
-// fresh random identity per session would make cross-session recall
-// silently never work, so it must survive a reload.
+// this + optional signup/login, docs/PLAN_AUTH.md). Memory keys facts off
+// this id — a fresh random identity per session would make cross-session
+// recall silently never work, so it must survive a reload.
 const IDENTITY_STORAGE_KEY = "sarjy:identity";
 
-function getOrCreateIdentity(): string {
+// Top-level exports, not only returned from useSarjyRoom() below — plain
+// functions with no dependency on a Room instance, so useAuth.ts's
+// signup() can call them directly without instantiating (and discarding)
+// a whole extra Room just to reach this. Nuxt auto-imports every named
+// export from a composables/ file, not only its own useXxx function, so
+// this doesn't change how ConversationSidebar.vue/useLiveUpdates.ts
+// already consume getOrCreateIdentity via the composable's return value.
+export function getOrCreateIdentity(): string {
   const existing = localStorage.getItem(IDENTITY_STORAGE_KEY);
   if (existing) return existing;
   const identity = crypto.randomUUID();
   localStorage.setItem(IDENTITY_STORAGE_KEY, identity);
   return identity;
+}
+
+// Called right after a successful signup claims this browser's anonymous
+// identity in place (server/api/auth/signup.post.ts's ON CONFLICT ... DO
+// UPDATE) — without this, a later logout would leave this browser
+// permanently sending a now-password-protected uid as its guest
+// identity, and every future anonymous call would 401 forever
+// (resolveIdentity, server/utils/auth.ts). Clearing it here means the
+// next getOrCreateIdentity() call mints a brand-new, unclaimed one.
+export function resetIdentity(): void {
+  localStorage.removeItem(IDENTITY_STORAGE_KEY);
 }
 
 export interface TranscriptEntry {

@@ -17,11 +17,24 @@
 // acceptable gap: the sidebar's existing fetch-on-load path already
 // covers that case today, unaffected either way.
 export default defineWebSocketHandler({
-  open(peer) {
-    const identity = new URL(
-      peer.request?.url ?? "",
-      "http://internal",
-    ).searchParams.get("identity");
+  // async: resolveIdentity's DB fallback check (server/utils/auth.ts) is
+  // itself async. Cookie access only works here, at open() time — a
+  // hibernated-peer restore under the Cloudflare Durable Object adapter
+  // loses peer.request entirely except the URL (confirmed by reading
+  // crossws's own adapter source), which is harmless as long as this
+  // resolution only ever runs once, right here, and never gets moved
+  // into a later hook.
+  async open(peer) {
+    const queryIdentity =
+      new URL(peer.request?.url ?? "", "http://internal").searchParams.get(
+        "identity",
+      ) ?? undefined;
+    const cookieHeader = peer.request?.headers.get("cookie") ?? null;
+    const sessionCookie = parseCookieFromHeader(
+      cookieHeader,
+      SESSION_COOKIE_NAME,
+    );
+    const identity = await resolveIdentity(sessionCookie, { queryIdentity });
     if (identity) peer.subscribe(identity);
   },
 });

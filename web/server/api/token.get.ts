@@ -7,7 +7,12 @@ import { AccessToken } from "livekit-server-sdk";
 
 export default defineEventHandler(async (event) => {
   const config = useRuntimeConfig();
-  const identity = getQuery(event).identity?.toString() ?? crypto.randomUUID();
+  // fallbackToRandom guarantees a non-null result — see resolveIdentity's
+  // own contract in server/utils/auth.ts.
+  const identity = (await resolveIdentity(getSessionCookieValue(event), {
+    queryIdentity: getQuery(event).identity?.toString(),
+    fallbackToRandom: true,
+  }))!;
   // Unique per session, not a fixed name: automatic agent dispatch fires
   // once per *new* room, not per participant join — a reused room name
   // across Stop/Start cycles would leave the second session with no agent.
