@@ -15,7 +15,16 @@
 // its types still need an explicit import.
 import type { H3Event } from "h3";
 
-const PBKDF2_ITERATIONS = 210_000;
+// 100,000, not the originally-planned 210,000 (OWASP 2023) — confirmed
+// live against the real deployed Worker (not assumed, per this file's
+// own top-of-file lesson): Cloudflare's crypto.subtle.deriveBits hard-
+// rejects PBKDF2 above 100,000 iterations ("Pbkdf2 failed: iteration
+// counts above 100000 are not supported"), independent of any CPU-time
+// budget — every signup/login 500'd in production until this was capped
+// to the platform's actual ceiling. 100,000 is still a solid, widely-used
+// PBKDF2-HMAC-SHA256 iteration count, just not the newest highest
+// recommendation.
+const PBKDF2_ITERATIONS = 100_000;
 const SALT_BYTES = 16;
 
 // The one thing kept as a literal rather than computed: a fixed dummy
@@ -28,7 +37,7 @@ const SALT_BYTES = 16;
 // module load: a real derivation at import time would mean every cold
 // start pays this cost regardless of whether login is ever called.
 const DUMMY_PASSWORD_HASH =
-  "pbkdf2$210000$RVasV6koWb3d0C5a-Zn1gA$DKCEBI2_69iAyEYGOuO5JwJGuJ3WBEPlfGVam_JLh1k";
+  "pbkdf2$100000$x0Mezk_RgMrxHI25YO7Rlw$VNctsIRg9Nmk_FILgUyN1yO8rrCizY2JeqtVsLsxagY";
 
 // Exported so server/routes/ws.ts (no H3Event, reads the cookie header
 // directly off peer.request) can name the same cookie without duplicating
