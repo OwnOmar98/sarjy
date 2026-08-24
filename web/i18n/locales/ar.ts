@@ -45,5 +45,7 @@ export default {
   emailAlreadyInUse: "هذا البريد الإلكتروني مستخدم بالفعل.",
   invalidSignupDetails:
     "أدخل بريدًا إلكترونيًا صالحًا وكلمة مرور لا تقل عن 8 أحرف.",
+  showPassword: "إظهار كلمة المرور",
+  hidePassword: "إخفاء كلمة المرور",
   $vuetify,
 };

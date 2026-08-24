@@ -16,6 +16,7 @@ const email = ref("");
 const password = ref("");
 const submitting = ref(false);
 const errorKey = ref<string | null>(null);
+const passwordVisible = ref(false);
 
 // Already logged in (a returning visit, or a fresh login just landed
 // here from a stale bookmark) — nothing to do here.
@@ -118,15 +119,57 @@ async function submit() {
         <label class="login-form__label" for="login-password">{{
           t("password")
         }}</label>
-        <input
-          id="login-password"
-          v-model="password"
-          class="login-form__input"
-          type="password"
-          :autocomplete="mode === 'login' ? 'current-password' : 'new-password'"
-          required
-          :disabled="submitting"
-        />
+        <div class="login-form__password-wrap">
+          <input
+            id="login-password"
+            v-model="password"
+            class="login-form__input login-form__input--password"
+            :type="passwordVisible ? 'text' : 'password'"
+            :autocomplete="
+              mode === 'login' ? 'current-password' : 'new-password'
+            "
+            required
+            :disabled="submitting"
+          />
+          <!-- type="button", not submit — inside a <form>, a plain
+          <button> defaults to type="submit" and this would otherwise
+          submit the form (and, in Chrome, briefly trigger its native
+          password-reveal-on-hold affordance) instead of just toggling
+          visibility. -->
+          <button
+            type="button"
+            class="login-form__password-toggle"
+            :aria-label="
+              passwordVisible ? t('hidePassword') : t('showPassword')
+            "
+            :aria-pressed="passwordVisible"
+            @click="passwordVisible = !passwordVisible"
+          >
+            <!-- Same hand-drawn line-icon convention as SarjyApp.vue's
+            mute icon: one shape, a conditional slash line signals the
+            "off"/hidden state rather than swapping to a second icon. -->
+            <svg
+              width="18"
+              height="18"
+              viewBox="0 0 20 20"
+              fill="none"
+              aria-hidden="true"
+            >
+              <path
+                d="M2 10c1.8-3.6 5-6 8-6s6.2 2.4 8 6c-1.8 3.6-5 6-8 6s-6.2-2.4-8-6z"
+              />
+              <circle cx="10" cy="10" r="2.25" />
+              <line
+                v-if="!passwordVisible"
+                class="login-form__password-toggle-slash"
+                x1="3"
+                y1="3"
+                x2="17"
+                y2="17"
+              />
+            </svg>
+          </button>
+        </div>
 
         <p v-if="errorKey" class="connect-error" role="alert">
           {{ t(errorKey) }}
@@ -264,6 +307,61 @@ async function submit() {
 .login-form__input:focus-visible {
   outline: none;
   border-color: rgb(var(--v-theme-primary));
+}
+
+/* The margin-block-end that plain .login-form__input carries moves here
+   — the password input is nested inside this now, so the input itself
+   can't own the gap to whatever comes after the wrapper. */
+.login-form__password-wrap {
+  position: relative;
+  margin-block-end: 1rem;
+}
+
+.login-form__input--password {
+  margin-block-end: 0;
+  /* Room for the toggle button so typed text never runs under it. */
+  padding-inline-end: 2.5rem;
+}
+
+.login-form__password-toggle {
+  position: absolute;
+  inset-block: 0;
+  inset-inline-end: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.5rem;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--ink-muted);
+}
+
+.login-form__password-toggle:hover {
+  color: rgb(var(--v-theme-primary));
+}
+
+.login-form__password-toggle:focus-visible {
+  outline: 2px solid rgb(var(--v-theme-primary));
+  outline-offset: -2px;
+}
+
+.login-form__password-toggle svg {
+  flex-shrink: 0;
+}
+
+.login-form__password-toggle path,
+.login-form__password-toggle circle,
+.login-form__password-toggle line {
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.login-form__password-toggle circle {
+  fill: currentColor;
+  stroke: none;
 }
 
 /* .aperture-button is a scoped class in SarjyApp.vue — Vue's scoped
