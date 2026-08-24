@@ -46,5 +46,7 @@ export default {
   emailAlreadyInUse: "That email is already in use.",
   invalidSignupDetails:
     "Enter a valid email and a password at least 8 characters long.",
+  showPassword: "Show password",
+  hidePassword: "Hide password",
   $vuetify,
 };

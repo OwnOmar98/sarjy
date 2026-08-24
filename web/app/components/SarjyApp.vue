@@ -119,6 +119,30 @@ const { locale, locales, t, setLocale } = useI18n();
 // transparently prefers the session cookie once one exists, so logging
 // in "just works" without touching connect()/getOrCreateIdentity().
 const { currentUser, authLoading, logout } = useAuth();
+
+// Without this, logging out left the sidebar (and an open transcript)
+// showing whatever the previous identity's data was until something else
+// happened to trigger a refetch (confirmed live: it took clicking into a
+// conversation, which then 404'd, before the stale list disappeared) —
+// resolveIdentity has already stopped honoring that data server-side the
+// instant the cookie clears, the UI just hadn't caught up. Reuses the
+// same refresh() methods onReconnect above already calls.
+//
+// No "skip the first firing" guard here on purpose, even though that
+// first firing is often just useAuth's own initial /api/auth/me
+// resolution (already harmless to re-fetch on top of) — a "skip exactly
+// one" counter is wrong for a *different* real case: navigating here
+// straight from a just-completed login/signup, currentUser is already
+// set before this component ever mounts, so there's no null→value
+// transition to skip at all, and the very next change (a logout) would
+// itself become that "first" firing and get incorrectly swallowed.
+// Confirmed live — that's exactly what happened before this comment was
+// rewritten. A once-in-a-while redundant sidebar refetch is a fine price
+// for never silently dropping a real logout.
+watch(currentUser, () => {
+  sidebarRef.value?.refresh();
+  transcriptRef.value?.refresh();
+});
 </script>
 
 <template>
