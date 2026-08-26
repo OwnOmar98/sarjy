@@ -309,6 +309,17 @@ export function useSarjyRoom() {
     agentGreeted.value = false;
     muted.value = false;
     audioBlocked.value = false;
+    // Once the call ends, every turn it produced is either already saved
+    // or about to be (SarjyApp.vue's watch(connected) refreshes the
+    // selected conversation's messages right after this fires). Keeping
+    // this local copy around past that point means the SAME turn renders
+    // twice in SelectedConversationTranscript.vue — once from its own
+    // messages list (the DB-backed one, kept in sync live over the
+    // WebSocket) and once more from this ref, passed through as
+    // liveEntries — confirmed live: a call's own turns stayed doubled up
+    // until a full page refresh, which only "fixed" it by wiping this
+    // in-memory ref, not because anything server-side was actually wrong.
+    transcript.value = [];
     clearReadyTimeout();
     stopLevelMeter();
   });
